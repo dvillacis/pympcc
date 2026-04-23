@@ -15,17 +15,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install lint tools
-        run: uv pip install ruff mypy numpy --system
 
       - name: Ruff
-        run: ruff check pympcc/
+        run: uvx ruff check pympcc/
 
       - name: Mypy
-        run: mypy pympcc/ --ignore-missing-imports
+        run: uvx --with numpy mypy pympcc/ --ignore-missing-imports
 
   # ------------------------------------------------------------------ #
   # Core test matrix: Python 3.11 / 3.12, no optional extras           #
