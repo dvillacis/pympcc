@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._base import BaseStrategy
+from .._stationarity import classify_stationarity, compute_kkt_residual
 from ..result import MPCCResult
-from .._stationarity import classify_stationarity
+from ._base import BaseStrategy
 
 _INF = 2e19
 
@@ -13,6 +13,8 @@ _INF = 2e19
 class DirectStrategy(BaseStrategy):
     """
     Direct NLP reformulation.
+
+    This strategy accepts no extra options.
 
     Replaces the complementarity conditions with::
 
@@ -25,11 +27,13 @@ class DirectStrategy(BaseStrategy):
     """
 
     name = "direct"
+    _VALID_OPTIONS: frozenset = frozenset()
 
     def _build_jax_hessian(self):
         """Build exact Lagrangian Hessian via JAX autodiff."""
-        from .._jax import jax_hessian_lagrangian
         import jax.numpy as jnp
+
+        from .._jax import jax_hessian_lagrangian
         p = self.problem
         n_g, n_h, n_c = p.n_ineq, p.n_eq, p.n_comp
         m = n_g + n_h + 3 * n_c  # [g, h, G, H, G*H]
@@ -124,12 +128,16 @@ class DirectStrategy(BaseStrategy):
                 return np.vstack(jac_rows)
 
         hess_fn, hess_sparsity = None, None
-        if self._has_jax_hessian():
+        if self._has_manual_hessian():
+            p = self.problem
+            hess_fn = p.lagrangian_hessian
+            hess_sparsity = p.lagrangian_hessian_sparsity
+        elif self._has_jax_hessian():
             hess_fn, hess_sparsity = self._build_jax_hessian()
 
         nlp = self._build_nlp(cl, cu, constraints, jacobian, jac_structure,
                                hess_fn=hess_fn, hess_sparsity=hess_sparsity)
-        x, info = nlp.solve(p.x0)
+        x, info, solve_time = self._timed_solve(nlp, p.x0, {})
 
         G = np.asarray(p.comp_G(x))
         H = np.asarray(p.comp_H(x))
@@ -148,7 +156,21 @@ class DirectStrategy(BaseStrategy):
             # when comp_residual is acceptably small.
             success=info["status"] in (0, 1, 3),
             strategy=self.name,
+            solve_time=solve_time,
             mult_g=info["mult_g"],
         )
         result.stationarity = classify_stationarity(result, self.problem)
+        # Direct layout: [g, h, G, H, G*H].  MPCC multipliers are
+        # μ_G = λ_G + H ⊙ λ_GH  and  μ_H = λ_H + G ⊙ λ_GH.
+        _off = n_g + n_h
+        lam_G  = info["mult_g"][_off           : _off + n_c]
+        lam_H  = info["mult_g"][_off + n_c     : _off + 2 * n_c]
+        lam_GH = info["mult_g"][_off + 2 * n_c : _off + 3 * n_c]
+        result.kkt_residual = compute_kkt_residual(
+            result, self.problem,
+            mpcc_mult_G=lam_G + result.H * lam_GH,
+            mpcc_mult_H=lam_H + result.G * lam_GH,
+            mult_x_L=info.get("mult_x_L"),
+            mult_x_U=info.get("mult_x_U"),
+        )
         return result

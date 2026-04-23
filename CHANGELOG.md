@@ -7,6 +7,63 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.2.0] - 2026-04-23
+
+### Added
+
+**KKT stationarity residual**
+- `compute_kkt_residual(result, problem, *, mpcc_mult_G, mpcc_mult_H, mult_x_L, mult_x_U)`
+  — computes `‖∇f + Jgᵀλ_g + Jhᵀλ_h + JGᵀμ_G + JHᵀμ_H − z_L + z_U‖_∞`;
+  requires explicit MPCC multipliers to account for strategy-specific reformulation terms
+- `MPCCResult.kkt_residual` — populated automatically by all six strategies using the
+  correct per-strategy MPCC multiplier corrections:
+  Scholtes/Direct: `μ_G = λ_G + H⊙λ_GH`, `μ_H = λ_H + G⊙λ_GH`;
+  Lin-Fukushima: additionally `+λ_GPH` for both;
+  Smoothing: `μ_G = λ_G + (1−G/r)⊙λ_φ`, `μ_H = λ_H + (1−H/r)⊙λ_φ`, `r=√(G²+H²+ε²)`;
+  Augmented Lagrangian: `μ_G = λ_G + μ_AL⊙H`, `μ_H = λ_H + μ_AL⊙G`;
+  Slack: direct z-space multipliers, variable bound multipliers truncated to `[:n]`
+- `compute_kkt_residual` exported in the top-level `pympcc` namespace
+
+**Bound validation**
+- `MPCCProblem._validate()` now emits a `UserWarning` when `x0` violates any finite
+  variable bound; IPOPT projects `x0` internally, so this is a warning not an error
+
+**Stationarity documentation**
+- Interior-point bias caveat added to `pympcc._stationarity` module docstring:
+  IPOPT's barrier forces μ_G, μ_H ≥ 0 for all active lower-bound constraints at
+  convergence, making `classify_stationarity` almost always return `"S-stationary"`;
+  `kkt_residual` is the primary quality metric
+
+**Performance kernels (`pympcc._kernels`)**
+- `eval_phi_eps_weighted_union` — fused Fischer-Burmeister weighted union kernel (Numba JIT)
+- `coo_to_dense` — COO-to-dense conversion kernel (Numba JIT)
+- Pre-allocated Jacobian output buffers: `_union_buf` aliased as a view into `_jac_flat_buf`,
+  eliminating the last per-call allocation on the hot path
+
+**MacMPEC benchmark suite**
+- Expanded to 13 problems (was 8); added `kth2`, `outrata32`, `simple_ineq`, `chain2`, `bilevel1`
+
+**CI/CD**
+- New `test-numba` job in `.github/workflows/tests.yml` verifies JIT kernels compile and
+  produce correct results on Python 3.11 + numba≥0.57; pre-warms the Numba cache before
+  the test run
+
+**Analytical Lagrangian Hessian support**
+- Four new optional fields on `MPCCProblem`:
+  - `lagrangian_hessian` — callable `(x, lagrange, obj_factor) → nnz_values` for the strategies that operate in the original x-space (`direct`, `scholtes`, `lin_fukushima`)
+  - `lagrangian_hessian_sparsity` — COO lower-triangle sparsity pattern `(row_indices, col_indices)` for the above
+  - `lagrangian_hessian_slack` — same callable signature but evaluated in the lifted z-space `z = [x, s_G, s_H]`; used by the `slack` strategy
+  - `lagrangian_hessian_slack_sparsity` — COO lower-triangle sparsity pattern for the lifted Hessian
+- Strategies `direct`, `scholtes`, and `lin_fukushima` query `lagrangian_hessian` and fall back to JAX autodiff (if available) or L-BFGS
+- Strategy `slack` queries `lagrangian_hessian_slack` and falls back to JAX autodiff or L-BFGS
+- `_has_manual_hessian()` helper on `BaseStrategy` checks whether `lagrangian_hessian` is populated
+- Constraint multiplier ordering for `lagrangian_hessian`: `[g (n_ineq), h (n_eq), G (n_comp), H (n_comp), G·H (n_comp)]`; `lin_fukushima` appends an additional `G+H (n_comp)` block (which has zero Hessian, so the same callable works for all three strategies)
+- Constraint multiplier ordering for `lagrangian_hessian_slack`: `[h (n_eq), G−s_G (n_comp), H−s_H (n_comp), s_G·s_H (n_comp)]` where `z = [x, s_G, s_H]`
+- `augmented_lagrangian` and `smoothing` are intentionally excluded: the PHR penalty and φ_ε smoothing introduce Hessian terms that cannot be expressed as a static callable independent of the strategy internals
+- JAX autodiff Hessian fallback remains available via `pip install "pympcc[jax]"` for all four supported strategies
+
+---
+
 ## [0.1.0] — 2026-04-21
 
 Initial release.

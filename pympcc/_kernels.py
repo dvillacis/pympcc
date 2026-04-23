@@ -13,6 +13,14 @@ eval_weighted_union(v_G, v_H, alpha, beta, r_u, map1, map2, out) -> None
     Entries where map1[k] or map2[k] == -1 contribute zero.
     Writes into *out* in-place (shape: nnz_union,).
 
+eval_phi_eps_weighted_union(v_G, v_H, G, H, eps, r_u, map1, map2, out) -> None
+    Fused Fischer-Burmeister kernel for the smoothing strategy Jacobian.
+    Computes the phi_eps weights inline — no temporary (n_comp,) arrays:
+        r      = sqrt(G[row]^2 + H[row]^2 + eps^2)
+        alpha  = 1 - G[row] / r
+        beta   = 1 - H[row] / r
+        out[k] = alpha * v_G[map1[k]] + beta * v_H[map2[k]]
+
 weighted_row_sum(alpha, A, beta, B, out) -> None
     Fill *out[i,j] = alpha[i]*A[i,j] + beta[i]*B[i,j]* in-place.
     Used for ∂(G·H)/∂x = H·JG + G·JH in dense Jacobian paths.
@@ -20,6 +28,10 @@ weighted_row_sum(alpha, A, beta, B, out) -> None
 scatter_add(out, indices, values) -> None
     Equivalent to ``np.add.at(out, indices, values)`` but faster when
     Numba is available (avoids Python-level loop overhead in np.add.at).
+
+coo_to_dense(rows, cols, values, out) -> None
+    Fill *out[rows[k], cols[k]] = values[k]* in-place.
+    Faster than NumPy advanced indexing assignment for large sparse arrays.
 
 HAS_NUMBA : bool
     True when Numba is available in the current environment.
@@ -104,6 +116,58 @@ if HAS_NUMBA:   # pragma: no cover
         for i in range(len(indices)):
             out[indices[i]] += values[i]
 
+    @_njit(cache=True)
+    def eval_phi_eps_weighted_union(
+        v_G: np.ndarray,
+        v_H: np.ndarray,
+        G: np.ndarray,
+        H: np.ndarray,
+        eps: float,
+        r_u: np.ndarray,
+        map1: np.ndarray,
+        map2: np.ndarray,
+        out: np.ndarray,
+    ) -> None:
+        """
+        Fused Fischer-Burmeister kernel for the smoothing Jacobian.
+
+        Computes phi_eps weights inline — no (n_comp,) temporaries::
+
+            r      = sqrt(G[row]^2 + H[row]^2 + eps^2)
+            alpha  = 1 - G[row] / r
+            beta   = 1 - H[row] / r
+            out[k] = alpha * v_G[map1[k]] + beta * v_H[map2[k]]
+
+        Called on every sparse Jacobian callback.  No heap allocation.
+        """
+        for k in range(out.shape[0]):
+            row = r_u[k]
+            r_norm = (G[row] * G[row] + H[row] * H[row] + eps * eps) ** 0.5
+            alpha_k = 1.0 - G[row] / r_norm
+            beta_k  = 1.0 - H[row] / r_norm
+            v = 0.0
+            if map1[k] >= 0:
+                v += alpha_k * v_G[map1[k]]
+            if map2[k] >= 0:
+                v += beta_k  * v_H[map2[k]]
+            out[k] = v
+
+    @_njit(cache=True)
+    def coo_to_dense(
+        rows: np.ndarray,
+        cols: np.ndarray,
+        values: np.ndarray,
+        out: np.ndarray,
+    ) -> None:
+        """
+        Fill ``out[rows[k], cols[k]] = values[k]`` in-place.
+
+        Faster than NumPy advanced indexing for large sparse arrays due
+        to avoided Python-level dispatch overhead.
+        """
+        for k in range(len(values)):
+            out[rows[k], cols[k]] = values[k]
+
 else:
     def eval_weighted_union(    # type: ignore[misc]
         v_G: np.ndarray,
@@ -140,3 +204,35 @@ else:
         values: np.ndarray,
     ) -> None:
         np.add.at(out, indices, values)
+
+    def eval_phi_eps_weighted_union(    # type: ignore[misc]
+        v_G: np.ndarray,
+        v_H: np.ndarray,
+        G: np.ndarray,
+        H: np.ndarray,
+        eps: float,
+        r_u: np.ndarray,
+        map1: np.ndarray,
+        map2: np.ndarray,
+        out: np.ndarray,
+    ) -> None:
+        g_r = G[r_u]
+        h_r = H[r_u]
+        r = np.sqrt(g_r * g_r + h_r * h_r + eps * eps)
+        alpha = 1.0 - g_r / r
+        beta  = 1.0 - h_r / r
+        out[:] = 0.0
+        m1 = map1 >= 0
+        if m1.any():
+            out[m1] += alpha[m1] * v_G[map1[m1]]
+        m2 = map2 >= 0
+        if m2.any():
+            out[m2] += beta[m2] * v_H[map2[m2]]
+
+    def coo_to_dense(                   # type: ignore[misc]
+        rows: np.ndarray,
+        cols: np.ndarray,
+        values: np.ndarray,
+        out: np.ndarray,
+    ) -> None:
+        out[rows, cols] = values

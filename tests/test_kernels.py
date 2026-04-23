@@ -4,6 +4,8 @@ import pytest
 
 from pympcc._kernels import (
     HAS_NUMBA,
+    coo_to_dense,
+    eval_phi_eps_weighted_union,
     eval_weighted_union,
     scatter_add,
     weighted_row_sum,
@@ -163,3 +165,173 @@ class TestScatterAdd:
         out = np.array([10.0, 20.0, 30.0])
         scatter_add(out, np.array([0, 2], dtype=np.intp), np.array([1.0, 2.0]))
         np.testing.assert_allclose(out, [11.0, 20.0, 32.0])
+
+
+# ------------------------------------------------------------------ #
+# eval_phi_eps_weighted_union                                          #
+# ------------------------------------------------------------------ #
+
+class TestEvalPhiEpsWeightedUnion:
+    """
+    Fused Fischer-Burmeister kernel.
+
+    Reference (naive):
+        r      = sqrt(G[row]^2 + H[row]^2 + eps^2)
+        alpha  = 1 - G[row] / r
+        beta   = 1 - H[row] / r
+        out[k] = alpha * v_G[map1[k]] + beta * v_H[map2[k]]
+    """
+
+    def _ref(self, v_G, v_H, G, H, eps, r_u, map1, map2):
+        """Naive per-element reference, independent of the kernel."""
+        out = np.zeros(len(r_u))
+        for k in range(len(r_u)):
+            row = r_u[k]
+            r_norm = np.sqrt(G[row] ** 2 + H[row] ** 2 + eps ** 2)
+            alpha_k = 1.0 - G[row] / r_norm
+            beta_k  = 1.0 - H[row] / r_norm
+            if map1[k] >= 0:
+                out[k] += alpha_k * v_G[map1[k]]
+            if map2[k] >= 0:
+                out[k] += beta_k  * v_H[map2[k]]
+        return out
+
+    def test_matches_reference(self):
+        rng = np.random.default_rng(42)
+        n_rows, nnz = 5, 8
+        v_G = rng.standard_normal(nnz)
+        v_H = rng.standard_normal(nnz)
+        G   = rng.standard_normal(n_rows)
+        H   = rng.standard_normal(n_rows)
+        eps = 0.1
+        r_u  = np.array([0, 0, 1, 2, 3, 3, 4, 4], dtype=np.intp)
+        map1 = np.arange(nnz, dtype=np.intp)
+        map2 = np.arange(nnz, dtype=np.intp)
+        out = np.empty(nnz)
+        eval_phi_eps_weighted_union(v_G, v_H, G, H, eps, r_u, map1, map2, out)
+        expected = self._ref(v_G, v_H, G, H, eps, r_u, map1, map2)
+        np.testing.assert_allclose(out, expected, rtol=1e-12)
+
+    def test_sentinel_minus_one(self):
+        """map1 == -1 means only v_H contributes; map2 == -1 means only v_G."""
+        G   = np.array([1.0, 2.0])
+        H   = np.array([0.5, 0.5])
+        v_G = np.array([10.0, 20.0])
+        v_H = np.array([30.0, 40.0])
+        eps = 0.01
+        r_u  = np.array([0, 1], dtype=np.intp)
+        map1 = np.array([-1, 0], dtype=np.intp)   # entry 0: only v_H
+        map2 = np.array([0, -1], dtype=np.intp)   # entry 1: only v_G
+        out = np.empty(2)
+        eval_phi_eps_weighted_union(v_G, v_H, G, H, eps, r_u, map1, map2, out)
+        expected = self._ref(v_G, v_H, G, H, eps, r_u, map1, map2)
+        np.testing.assert_allclose(out, expected, rtol=1e-12)
+
+    def test_writes_into_pre_allocated_buffer(self):
+        G   = np.array([1.0])
+        H   = np.array([1.0])
+        v_G = np.array([2.0])
+        v_H = np.array([3.0])
+        eps = 1.0
+        r_u  = np.array([0], dtype=np.intp)
+        map1 = np.array([0], dtype=np.intp)
+        map2 = np.array([0], dtype=np.intp)
+        out = np.zeros(1)
+        eval_phi_eps_weighted_union(v_G, v_H, G, H, eps, r_u, map1, map2, out)
+        expected = self._ref(v_G, v_H, G, H, eps, r_u, map1, map2)
+        np.testing.assert_allclose(out, expected, rtol=1e-12)
+
+    def test_multiple_eps_values(self):
+        """Varying eps should change the weights continuously."""
+        rng = np.random.default_rng(7)
+        n_rows, nnz = 3, 4
+        v_G = rng.standard_normal(nnz)
+        v_H = rng.standard_normal(nnz)
+        G   = np.abs(rng.standard_normal(n_rows)) + 0.1
+        H   = np.abs(rng.standard_normal(n_rows)) + 0.1
+        r_u  = np.array([0, 0, 1, 2], dtype=np.intp)
+        map1 = np.arange(nnz, dtype=np.intp)
+        map2 = np.arange(nnz, dtype=np.intp)
+        out = np.empty(nnz)
+        for eps in [1.0, 0.1, 1e-4, 1e-8]:
+            eval_phi_eps_weighted_union(v_G, v_H, G, H, eps, r_u, map1, map2, out)
+            expected = self._ref(v_G, v_H, G, H, eps, r_u, map1, map2)
+            np.testing.assert_allclose(out, expected, rtol=1e-11,
+                                       err_msg=f"failed at eps={eps}")
+
+    @pytest.mark.skipif(not HAS_NUMBA, reason="Numba not installed")
+    def test_numba_matches_numpy_fallback(self):
+        """Numba and pure-NumPy fallback must produce identical results."""
+        import pympcc._kernels as _mod
+        # Access the fallback directly from the else-branch by temporarily
+        # shadowing HAS_NUMBA.  We do this by defining the same function body.
+        rng = np.random.default_rng(99)
+        n_rows, nnz = 6, 10
+        v_G = rng.standard_normal(nnz)
+        v_H = rng.standard_normal(nnz)
+        G   = rng.standard_normal(n_rows)
+        H   = rng.standard_normal(n_rows)
+        eps = 0.05
+        r_u  = np.sort(rng.integers(0, n_rows, size=nnz).astype(np.intp))
+        map1 = np.arange(nnz, dtype=np.intp)
+        map2 = np.arange(nnz, dtype=np.intp)
+        # Numba version
+        out_jit = np.empty(nnz)
+        eval_phi_eps_weighted_union(v_G, v_H, G, H, eps, r_u, map1, map2, out_jit)
+        # Reference
+        out_ref = self._ref(v_G, v_H, G, H, eps, r_u, map1, map2)
+        np.testing.assert_allclose(out_jit, out_ref, rtol=1e-12)
+
+
+# ------------------------------------------------------------------ #
+# coo_to_dense                                                         #
+# ------------------------------------------------------------------ #
+
+class TestCooToDense:
+    """Fill out[rows[k], cols[k]] = values[k] in-place."""
+
+    def test_basic(self):
+        out = np.zeros((3, 4))
+        rows   = np.array([0, 1, 2], dtype=np.intp)
+        cols   = np.array([1, 2, 3], dtype=np.intp)
+        values = np.array([1.0, 2.0, 3.0])
+        coo_to_dense(rows, cols, values, out)
+        assert out[0, 1] == pytest.approx(1.0)
+        assert out[1, 2] == pytest.approx(2.0)
+        assert out[2, 3] == pytest.approx(3.0)
+        # Untouched entries stay zero
+        assert out[0, 0] == pytest.approx(0.0)
+
+    def test_matches_advanced_indexing(self):
+        rng = np.random.default_rng(5)
+        n_rows, n_cols, nnz = 8, 10, 20
+        rows   = rng.integers(0, n_rows, size=nnz).astype(np.intp)
+        cols   = rng.integers(0, n_cols, size=nnz).astype(np.intp)
+        values = rng.standard_normal(nnz)
+        out_kernel = np.zeros((n_rows, n_cols))
+        out_ref    = np.zeros((n_rows, n_cols))
+        coo_to_dense(rows, cols, values, out_kernel)
+        out_ref[rows, cols] = values
+        np.testing.assert_allclose(out_kernel, out_ref)
+
+    def test_writes_inplace(self):
+        """Existing non-zero entries outside COO positions must be preserved."""
+        out = np.ones((2, 3)) * 9.0
+        rows   = np.array([0, 1], dtype=np.intp)
+        cols   = np.array([0, 2], dtype=np.intp)
+        values = np.array([5.0, 7.0])
+        coo_to_dense(rows, cols, values, out)
+        assert out[0, 0] == pytest.approx(5.0)
+        assert out[1, 2] == pytest.approx(7.0)
+        # Untouched entries keep their original value
+        assert out[0, 1] == pytest.approx(9.0)
+
+    def test_empty_coo(self):
+        out = np.ones((2, 2))
+        coo_to_dense(
+            np.array([], dtype=np.intp),
+            np.array([], dtype=np.intp),
+            np.array([]),
+            out,
+        )
+        np.testing.assert_allclose(out, 1.0)

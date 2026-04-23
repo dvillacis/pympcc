@@ -3,14 +3,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._base import BaseStrategy
+from .._stationarity import compute_kkt_residual
 from ..result import IterationInfo, MPCCResult
+from ._base import BaseStrategy
 
 _INF = 2e19
 
 _DEFAULTS = dict(
     epsilon_0=1.0, reduction=0.1, max_iter=20,
-    epsilon_min=1e-8, dual_warmstart=True,
+    epsilon_min=1e-8, dual_warmstart=True, comp_tol=None,
 )
 
 _STAT_TOL = 1e-6   # geometric tolerance for biactive-set detection
@@ -60,6 +61,10 @@ class SlackStrategy(BaseStrategy):
     dual_warmstart : bool
         Warm-start IPOPT dual variables between outer iterations
         (default ``True``).
+    comp_tol : float or None
+        If set, the outer loop terminates early when
+        ``comp_residual < comp_tol`` and IPOPT converged (status 0/1/3).
+        Default ``None`` (disabled; loop runs until ``ε < epsilon_min``).
 
     Notes
     -----
@@ -75,15 +80,20 @@ class SlackStrategy(BaseStrategy):
     """
 
     name = "slack"
+    _VALID_OPTIONS: frozenset = frozenset(_DEFAULTS)
 
     def __init__(self, problem, ipopt_options: dict, **kwargs) -> None:
-        super().__init__(problem, ipopt_options, callback=kwargs.pop("callback", None))
+        super().__init__(problem, ipopt_options,
+                         backend=kwargs.pop("backend", "ipopt"),
+                         solver_options=kwargs.pop("solver_options", None),
+                         callback=kwargs.pop("callback", None))
         opts = {**_DEFAULTS, **kwargs}
         self.epsilon_0: float = opts["epsilon_0"]
         self.reduction: float = opts["reduction"]
         self.max_iter: int = opts["max_iter"]
         self.epsilon_min: float = opts["epsilon_min"]
         self.dual_warmstart: bool = bool(opts["dual_warmstart"])
+        self.comp_tol: float | None = opts["comp_tol"]
 
     # ------------------------------------------------------------------ #
     # Lifted-space helpers                                                 #
@@ -236,7 +246,7 @@ class SlackStrategy(BaseStrategy):
         hess_sparsity=None,
     ):
         """Build a :class:`_SparseNLP` for the lifted ``(x, s_G, s_H)`` space."""
-        from .._nlp import _SparseNLP, _HessianMixin
+        from .._nlp import _HessianMixin, _SparseNLP
 
         if hess_fn is not None:
             cls = type("_NLPWithHess", (_HessianMixin, _SparseNLP), {})
@@ -258,6 +268,11 @@ class SlackStrategy(BaseStrategy):
     # ------------------------------------------------------------------ #
 
     def solve(self) -> MPCCResult:
+        if self.backend != "ipopt":
+            raise NotImplementedError(
+                "The 'slack' strategy requires sparse Jacobians and is "
+                "incompatible with backend='filterSQP'."
+            )
         p = self.problem
         n, n_c = p.n, p.n_comp
         n_z = n + 2 * n_c
@@ -271,23 +286,24 @@ class SlackStrategy(BaseStrategy):
         # Build sparsity structure once before the loop
         jac_structure = self._build_lifted_jac_structure()
 
-        def make_cl(eps: float) -> np.ndarray:
-            return np.concatenate([
-                np.full(p.n_ineq, -_INF),
-                np.zeros(p.n_eq),
-                np.zeros(n_c),        # G − s_G = 0  (lower)
-                np.zeros(n_c),        # H − s_H = 0  (lower)
-                np.full(n_c, -_INF),  # s_G · s_H   (no lower bound)
-            ])
+        # Static bounds — ε is absorbed into the constraint function via eps_ref
+        # so the NLP object can be reused across outer iterations.
+        cl = np.concatenate([
+            np.full(p.n_ineq, -_INF),
+            np.zeros(p.n_eq),
+            np.zeros(n_c),        # G − s_G = 0  (lower)
+            np.zeros(n_c),        # H − s_H = 0  (lower)
+            np.full(n_c, -_INF),  # s_G · s_H − ε  (no lower bound)
+        ])
+        cu = np.concatenate([
+            np.zeros(p.n_ineq),
+            np.zeros(p.n_eq),
+            np.zeros(n_c),        # G − s_G = 0  (upper)
+            np.zeros(n_c),        # H − s_H = 0  (upper)
+            np.zeros(n_c),        # s_G · s_H − ε ≤ 0  (was: s_G · s_H ≤ ε)
+        ])
 
-        def make_cu(eps: float) -> np.ndarray:
-            return np.concatenate([
-                np.zeros(p.n_ineq),
-                np.zeros(p.n_eq),
-                np.zeros(n_c),        # G − s_G = 0  (upper)
-                np.zeros(n_c),        # H − s_H = 0  (upper)
-                np.full(n_c, eps),    # s_G · s_H ≤ ε
-            ])
+        eps_ref = [self.epsilon_0]
 
         def constraints(z: np.ndarray) -> np.ndarray:
             x   = z[:n]
@@ -296,7 +312,7 @@ class SlackStrategy(BaseStrategy):
             std_parts = self._eval_standard_con_values(x)
             G = np.asarray(p.comp_G(x))
             H = np.asarray(p.comp_H(x))
-            return np.concatenate([*std_parts, G - s_G, H - s_H, s_G * s_H])
+            return np.concatenate([*std_parts, G - s_G, H - s_H, s_G * s_H - eps_ref[0]])
 
         # Pre-allocate the full flat Jacobian output (fixed size = total nnz).
         # Fill sections in-place on every callback — zero concatenation overhead.
@@ -360,7 +376,10 @@ class SlackStrategy(BaseStrategy):
             return np.concatenate([g, np.zeros(2 * n_c)])
 
         hess_fn, hess_sparsity = None, None
-        if self._has_jax_hessian():
+        if getattr(self.problem, "lagrangian_hessian_slack", None) is not None:
+            hess_fn = self.problem.lagrangian_hessian_slack
+            hess_sparsity = self.problem.lagrangian_hessian_slack_sparsity
+        elif self._has_jax_hessian():
             hess_fn, hess_sparsity, _ = self._build_jax_hessian_slack()
 
         # Initialise lifted variable vector
@@ -369,23 +388,30 @@ class SlackStrategy(BaseStrategy):
         H0 = np.asarray(p.comp_H(x))
         z = np.concatenate([x, np.maximum(G0, 0.0), np.maximum(H0, 0.0)])
 
+        # Build the NLP once — bounds are static, ε enters via eps_ref closure.
+        nlp = self._build_lifted_nlp(
+            cl, cu,
+            constraints, jacobian, jac_structure,
+            obj_lifted, grad_lifted, n_z, xl_z, xu_z,
+            hess_fn=hess_fn, hess_sparsity=hess_sparsity,
+        )
+
         history: list[IterationInfo] = []
         eps = self.epsilon_0
         last_info: dict = {}
         warm_dual: dict = {}
+        total_time: float = 0.0
 
-        for _ in range(self.max_iter):
-            nlp = self._build_lifted_nlp(
-                make_cl(eps), make_cu(eps),
-                constraints, jacobian, jac_structure,
-                obj_lifted, grad_lifted, n_z, xl_z, xu_z,
-                hess_fn=hess_fn, hess_sparsity=hess_sparsity,
-            )
-            if self.dual_warmstart and warm_dual:
+        for k in range(self.max_iter):
+            eps_ref[0] = eps
+            nlp.n_ipopt_iter = 0
+            if k == 1 and self.dual_warmstart:
                 nlp.add_option("warm_start_init_point", "yes")
-                z, last_info = nlp.solve(z, **warm_dual)
-            else:
-                z, last_info = nlp.solve(z)
+            # Loose tolerance early (relaxed NLP is intermediate, not the final answer).
+            # Floor is the user's requested tol so we never over-solve final iterations.
+            nlp.add_option("tol", max(self.ipopt_options.get("tol", 1e-8), eps * 1e-2))
+            z, last_info, iter_time = self._timed_solve(nlp, z, warm_dual)
+            total_time += iter_time
             if self.dual_warmstart:
                 warm_dual = {
                     "lagrange": last_info["mult_g"],
@@ -407,10 +433,15 @@ class SlackStrategy(BaseStrategy):
                 comp_residual=comp_residual,
                 comp_residual_mean=comp_residual_mean,
                 n_ipopt_iter=nlp.n_ipopt_iter,
+                iter_time=iter_time,
             ))
             if self.callback is not None:
                 self.callback(len(history) - 1, history[-1])
 
+            if (self.comp_tol is not None
+                    and history[-1].comp_residual < self.comp_tol
+                    and last_info["status"] in (0, 1, 3)):
+                break
             eps *= self.reduction
             if eps < self.epsilon_min:
                 break
@@ -434,8 +465,21 @@ class SlackStrategy(BaseStrategy):
             comp_residual_mean=float(np.mean(np.abs(G * H))),
             success=last_info["status"] in (0, 1, 3),
             strategy=self.name,
+            solve_time=total_time,
             history=history,
             mult_g=last_info.get("mult_g"),
         )
         result.stationarity = stationarity
+        # Slack layout: [g, h, G-sG=0, H-sH=0, sG*sH-ε≤0].  For x-KKT the
+        # MPCC multipliers are λ_{G-sG} and λ_{H-sH} directly — no correction
+        # needed since the G*H constraint acts on slacks, not on x.
+        # Bound multipliers are for z=[x,sG,sH]; only the first n entries apply to x.
+        _off = p.n_ineq + p.n_eq
+        result.kkt_residual = compute_kkt_residual(
+            result, p,
+            mpcc_mult_G=last_info["mult_g"][_off       : _off + n_c],
+            mpcc_mult_H=last_info["mult_g"][_off + n_c : _off + 2 * n_c],
+            mult_x_L=last_info.get("mult_x_L"),
+            mult_x_U=last_info.get("mult_x_U"),
+        )
         return result

@@ -1,6 +1,6 @@
 [project]
 name = "pympcc"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python solver for Mathematical Programs with Complementarity Constraints (MPCC) using IPOPT via cyipopt"
 readme = "README.md"
 license = { text = "MIT" }
@@ -36,10 +36,52 @@ Changelog = "https://github.com/davidvillacis/pympcc/blob/main/CHANGELOG.md"
 dev = [
     "pytest>=7.0",
     "pytest-cov",
+    "ruff>=0.4",
+    "mypy>=1.10",
 ]
 numba = ["numba>=0.57"]
 jax = ["jax>=0.4"]
+filterSQP = ["pyfiltersqp", "osqp>=1.0"]
+scipy = ["scipy>=1.10"]
+
+[tool.uv.sources]
+pyfiltersqp = { path = "../pyfiltersqp", editable = true }
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatchling.build.targets.wheel]
+packages = ["pympcc"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--tb=short"
+minversion = "7.0"
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@abstractmethod",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",   # line too long — handled by black/formatter
+    "E741",   # ambiguous variable name (l, O, I) — used legitimately in math code
+]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = true
+no_implicit_reexport = false

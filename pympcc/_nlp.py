@@ -167,9 +167,21 @@ class _SparseNLP(cyipopt.Problem):
         self._grad_fn = grad_fn
         self._con_fn = con_fn
         self._jac_fn = jac_fn
-        # Store before super().__init__ in case jacobianstructure() is called early.
-        self._jac_rows = np.asarray(jac_rows, dtype=int)
-        self._jac_cols = np.asarray(jac_cols, dtype=int)
+        # Store before super().__init__ in case jacobianstructure() is called
+        # early. Canonicalize to pointer-width ints and row-major order so the
+        # native IPOPT backend sees a stable sparse structure regardless of how
+        # callers assembled the pattern.
+        raw_rows = np.asarray(jac_rows, dtype=np.intp)
+        raw_cols = np.asarray(jac_cols, dtype=np.intp)
+        order = np.lexsort((raw_cols, raw_rows))
+        if raw_rows.size and not np.array_equal(order, np.arange(raw_rows.size)):
+            self._jac_order = order
+            self._jac_rows = raw_rows[order]
+            self._jac_cols = raw_cols[order]
+        else:
+            self._jac_order = None
+            self._jac_rows = raw_rows
+            self._jac_cols = raw_cols
         # Hessian state — set BEFORE super().__init__.
         self._hess_fn = hess_fn
         if hess_sparsity is not None:
@@ -203,5 +215,7 @@ class _SparseNLP(cyipopt.Problem):
             return np.empty(0, dtype=float)
         J = np.asarray(self._jac_fn(x), dtype=float)
         if J.ndim == 1:
-            return J                               # sparse-native: already nnz values
+            if self._jac_order is not None:
+                return J[self._jac_order]
+            return J                              # sparse-native: already nnz values
         return J[self._jac_rows, self._jac_cols]   # legacy: extract from dense matrix

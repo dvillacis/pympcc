@@ -22,11 +22,11 @@ Quickstart
 >>> result.success    # convergence flag
 """
 
-from .problem import MPCCProblem
+from ._stationarity import classify_stationarity, compute_kkt_residual
 from .models import StructuredMPCC
+from .problem import MPCCProblem
 from .result import IPOPTStatus, IterationInfo, MPCCResult
 from .solver import MPCCSolver, solve
-from ._stationarity import classify_stationarity
 
 __all__ = [
     "MPCCProblem",
@@ -37,5 +37,6 @@ __all__ = [
     "MPCCSolver",
     "solve",
     "classify_stationarity",
+    "compute_kkt_residual",
 ]
 __version__ = "0.1.0"

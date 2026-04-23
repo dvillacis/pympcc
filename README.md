@@ -124,6 +124,12 @@ pympcc.MPCCProblem(
     comp_H_jacobian_sparsity=None,
     ineq_jacobian_sparsity=None,
     eq_jacobian_sparsity=None,
+
+    # Analytical Lagrangian Hessian (optional) — see "Analytical Hessian" section
+    lagrangian_hessian=None,          # (x, lagrange, obj_factor) → nnz values; x-space (direct/scholtes/lin_fukushima)
+    lagrangian_hessian_sparsity=None, # (row_indices, col_indices) — lower triangle, row ≥ col
+    lagrangian_hessian_slack=None,    # same signature but z=[x,s_G,s_H]-space; slack strategy only
+    lagrangian_hessian_slack_sparsity=None,
 )
 ```
 
@@ -191,6 +197,7 @@ result = pympcc.solve(
 | `message` | `str` | Human-readable IPOPT status |
 | `strategy` | `str` | Strategy name used |
 | `stationarity` | `str` | Stationarity type: `"S-stationary"`, `"unknown"`, or `"not stationary"` |
+| `kkt_residual` | `float` or `None` | MPCC stationarity residual `‖∇f + Jgᵀλ_g + Jhᵀλ_h + JGᵀμ_G + JHᵀμ_H − z_L + z_U‖_∞`; `None` when multipliers unavailable |
 | `history` | `list[IterationInfo]` | Per-iteration diagnostics (iterative strategies only) |
 | `mult_g` | `(m,)` or `None` | Constraint multipliers from last inner IPOPT solve |
 
@@ -276,23 +283,74 @@ For an imaging application with `n=10,000` and `n_comp=50`:
 | Scholtes / smoothing | 10,000 / row | 50 × 10,000 = 500,000 |
 | Slack | 2 / row | 50 × 2 = 100 (+ pinning) |
 
+### Analytical Lagrangian Hessian
+
+By default IPOPT uses a limited-memory BFGS (L-BFGS) Hessian approximation. For problems where you can provide the exact Lagrangian Hessian you can supply it directly to get better convergence in the inner NLP solves.
+
+```python
+# H_L(x, λ, σ) = σ·∇²f + Σ_i λ_i ∇²c_i
+# Return: 1-D array of nnz values (lower triangle, row ≥ col)
+
+def my_hessian(x, lagrange, obj_factor):
+    # For a problem with n_eq equality constraints and n_comp complementarity pairs.
+    # Multiplier ordering (direct / scholtes / lin_fukushima):
+    #   lagrange = [λ_g (n_ineq), λ_h (n_eq), λ_G (n_comp), λ_H (n_comp), λ_GH (n_comp)]
+    # lin_fukushima appends one extra λ_GpH (n_comp) block (G+H is linear → zero Hessian).
+    ...
+    return nnz_values  # shape (nnz,)
+
+hess_rows = np.array([...])  # row indices, row ≥ col
+hess_cols = np.array([...])  # col indices
+
+problem = pympcc.MPCCProblem(
+    ...,
+    lagrangian_hessian=my_hessian,
+    lagrangian_hessian_sparsity=(hess_rows, hess_cols),
+)
+result = pympcc.solve(problem, strategy="scholtes")
+```
+
+The `slack` strategy operates in the lifted space `z = [x, s_G, s_H]` (length `n + 2·n_comp`). Its Hessian callable receives a `z` vector and multipliers in the lifted-constraint ordering `[λ_h, λ_{G−s_G}, λ_{H−s_H}, λ_{s_G s_H}]`:
+
+```python
+problem = pympcc.MPCCProblem(
+    ...,
+    lagrangian_hessian_slack=my_hessian_slack,
+    lagrangian_hessian_slack_sparsity=(slack_rows, slack_cols),
+)
+result = pympcc.solve(problem, strategy="slack")
+```
+
+**Notes:**
+- Supports `direct`, `scholtes`, and `lin_fukushima` via `lagrangian_hessian`; supports `slack` via `lagrangian_hessian_slack`.
+- `augmented_lagrangian` and `smoothing` are not supported — the PHR penalty and Fischer-Burmeister smoothing introduce second-derivative terms that cannot be expressed as a static callable.
+- If only one of the two Hessian fields is set, the supported strategies use the provided Hessian while the remaining strategies fall back to L-BFGS.
+- If JAX is installed (`pip install "pympcc[jax]"`), autodiff Hessians are computed automatically when no manual Hessian is provided.
+- The exact Hessian can be indefinite near MPCC solutions (LICQ typically fails there). If IPOPT enters a restoration phase with the exact Hessian, switching to L-BFGS (i.e., omitting the Hessian fields) is often more robust.
+
 ### Verbose IPOPT output
 
 ```python
 result = pympcc.solve(problem, ipopt_options={"print_level": 5})
 ```
 
-### Stationarity classification
+### Stationarity classification and KKT residual
 
 ```python
-from pympcc import classify_stationarity
-
 result = pympcc.solve(problem, strategy="scholtes")
 print(result.stationarity)     # "S-stationary"
+print(result.kkt_residual)     # ~1e-10 for converged solves
 
 # Or call directly with a tolerance:
+from pympcc import classify_stationarity
 stat = classify_stationarity(result, problem, tol=1e-6)
 ```
+
+> **Note:** Because IPOPT uses a primal-dual interior-point method, the barrier forces
+> all active lower-bound constraint multipliers to be non-negative at convergence, so
+> `result.stationarity` is almost always `"S-stationary"` for fully-converged IPOPT
+> solutions. Use `result.kkt_residual` as the primary quality metric — values below
+> `1e-6` indicate a well-converged KKT point.
 
 ---
 
@@ -306,8 +364,8 @@ The test suite covers all six strategies against the [MacMPEC benchmark collecti
 
 | File | Contents |
 |---|---|
-| `tests/macmpec_problems.py` | 8 MacMPEC problems with exact Jacobians and known optima |
-| `tests/test_macmpec.py` | Parametrized benchmark tests: convergence, objective accuracy, complementarity feasibility |
+| `tests/macmpec_problems.py` | 13 MacMPEC problems with exact Jacobians and known optima |
+| `tests/test_macmpec.py` | Parametrized benchmark tests: convergence, objective accuracy, complementarity feasibility, KKT residual |
 | `tests/test_strategies.py` | Unit tests for all strategies, options, result fields, and problem validation |
 | `tests/test_kernels.py` | Correctness tests for the hot-path numerical kernels |
 | `tests/test_stationarity.py` | Stationarity classification logic |
@@ -317,13 +375,18 @@ The test suite covers all six strategies against the [MacMPEC benchmark collecti
 | Problem | n | n_comp | f* | Notes |
 |---|---|---|---|---|
 | kth1 | 2 | 1 | 0 | Trivial LPEC |
+| kth2 | 4 | 2 | 0 | Two-comp extension of kth1 |
 | ralph1 | 2 | 1 | 0 | B-stationary only |
 | simple | 2 | 1 | 1 | Quadratic |
+| simple_ineq | 2 | 1 | 1 | Simple with active inequality constraint |
 | gauvin | 3 | 2 | 20 | Gauvin-Savard |
 | bard1 | 5 | 3 | 17 | KKT bilevel (Bard 1991) |
 | scholtes1 | 3 | 1 | 2 | Nonlinear (Scholtes 1997) |
 | scholtes2 | 3 | 1 | 15 | Nonlinear (Scholtes 1997) |
+| chain2 | 3 | 2 | 4 | Chain network, two comp pairs |
+| bilevel1 | 4 | 2 | 0 | Bilevel with G=H=0 at optimum |
 | outrata31 | 6 | 2 | 0 | KKT bilevel with 2 equalities |
+| outrata32 | 9 | 3 | 0 | KKT bilevel with 3 equalities (Outrata 1994) |
 
 > The `direct` strategy tests are marked `xfail(strict=False)` because LICQ generically fails at MPCC feasible points.
 

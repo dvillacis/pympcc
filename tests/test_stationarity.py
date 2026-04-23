@@ -236,3 +236,63 @@ class TestStationarityIntegration:
         """classify_stationarity must be importable from the top-level pympcc namespace."""
         assert hasattr(pympcc, "classify_stationarity")
         assert callable(pympcc.classify_stationarity)
+
+
+# ------------------------------------------------------------------ #
+# 3. KKT residual tests                                                #
+# ------------------------------------------------------------------ #
+
+class TestKKTResidual:
+    def test_returns_none_when_mult_g_none(self):
+        r, p = _make_mock([0.0], [0.0], [1.0], [1.0])
+        r.mult_g = None
+        assert pympcc.compute_kkt_residual(
+            r, p, mpcc_mult_G=np.ones(1), mpcc_mult_H=np.ones(1)) is None
+
+    def test_returns_none_when_mpcc_mult_not_provided(self):
+        r, p = _make_mock([0.0], [0.0], [1.0], [1.0])
+        assert pympcc.compute_kkt_residual(r, p) is None
+
+    def test_zero_residual_for_trivial_problem(self):
+        # gradient=0, zero Jacobians, zero multipliers → residual=0
+        r, p = _make_mock([0.0], [0.0], [0.0], [0.0])
+        res = pympcc.compute_kkt_residual(
+            r, p, mpcc_mult_G=np.zeros(1), mpcc_mult_H=np.zeros(1))
+        assert res == pytest.approx(0.0)
+
+    def test_residual_equals_gradient_when_jacs_zero(self):
+        # gradient=[3.0, 0.0], zero Jacobians, zero multipliers → residual = 3.0
+        problem = pympcc.MPCCProblem(
+            n=2, n_comp=1, x0=np.zeros(2),
+            objective=lambda x: 3 * x[0],
+            gradient=lambda x: np.array([3.0, 0.0]),
+            comp_G=lambda x: np.zeros(1),
+            comp_G_jacobian=lambda x: np.zeros((1, 2)),
+            comp_H=lambda x: np.zeros(1),
+            comp_H_jacobian=lambda x: np.zeros((1, 2)),
+        )
+        result = pympcc.MPCCResult(
+            x=np.zeros(2), obj=0.0, status=0, message="",
+            G=np.zeros(1), H=np.zeros(1),
+            comp_residual=0.0, comp_residual_mean=0.0,
+            success=True, strategy="mock",
+            mult_g=np.zeros(3),
+        )
+        res = pympcc.compute_kkt_residual(
+            result, problem, mpcc_mult_G=np.zeros(1), mpcc_mult_H=np.zeros(1))
+        assert res == pytest.approx(3.0)
+
+    def test_exported_from_pympcc_namespace(self):
+        assert hasattr(pympcc, "compute_kkt_residual")
+        assert callable(pympcc.compute_kkt_residual)
+
+    @pytest.mark.parametrize("strategy", [
+        "scholtes", "smoothing", "lin_fukushima", "augmented_lagrangian", "slack",
+    ])
+    def test_kkt_residual_small_after_solve(self, strategy):
+        """kkt_residual must be populated and small for converged solves."""
+        result = pympcc.solve(SIMPLE.problem, strategy=strategy)
+        assert result.kkt_residual is not None
+        assert result.kkt_residual < 1e-4, (
+            f"[{strategy}] kkt_residual={result.kkt_residual:.2e} is too large"
+        )

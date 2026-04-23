@@ -1,14 +1,18 @@
 """Abstract base class for MPCC reformulation strategies."""
 from __future__ import annotations
 
+import time
+import warnings
 from abc import ABC, abstractmethod
 
 import numpy as np
 
-from ..problem import MPCCProblem
-from ..result import MPCCResult
+from .._kernels import coo_to_dense as _coo_kernel
 from .._kernels import eval_weighted_union as _wu_kernel
 from .._kernels import weighted_row_sum as _wrs_kernel
+from .._stationarity import compute_kkt_residual as _compute_kkt_residual
+from ..problem import MPCCProblem
+from ..result import IPOPTStatus, MPCCResult
 
 
 class BaseStrategy(ABC):
@@ -21,10 +25,13 @@ class BaseStrategy(ABC):
 
     name: str = "base"
 
-    def __init__(self, problem: MPCCProblem, ipopt_options: dict,
+    def __init__(self, problem: MPCCProblem, ipopt_options: dict, *,
+                 backend: str = "ipopt", solver_options: dict | None = None,
                  **kwargs) -> None:
         self.problem = problem
         self.ipopt_options = ipopt_options
+        self.backend = backend
+        self.solver_options = solver_options or {}
         self.callback = kwargs.pop("callback", None)
         # Strategies that accept no extra kwargs (e.g. DirectStrategy) inherit
         # this base __init__; unknown kwargs are silently ignored so that
@@ -53,26 +60,91 @@ class BaseStrategy(ABC):
         """
         Construct and configure an NLP for this problem.
 
-        If *jac_structure* ``(rows, cols)`` is provided, builds a
-        :class:`_SparseNLP`; otherwise builds the default
-        :class:`_DenseNLP`.
+        The active backend (``self.backend``) determines which adapter is
+        built:
+
+        * ``"ipopt"`` (default) — builds :class:`_DenseNLP` or
+          :class:`_SparseNLP` (cyipopt adapter, current behaviour).
+          If *jac_structure* ``(rows, cols)`` is provided, the sparse
+          variant is used; otherwise the dense one.  When *hess_fn* and
+          *hess_sparsity* are given the NLP class is dynamically extended
+          with :class:`_HessianMixin`.
+
+        * ``"filterSQP"`` — builds a :class:`~pyfiltersqp._FilterSQPAdapter`
+          that presents the same ``solve()`` / ``add_option()`` interface.
+          When *jac_structure* is provided (sparse-native path), the Jacobian
+          is transparently densified before being handed to the adapter.
 
         *obj_fn* and *grad_fn* override ``problem.objective`` and
-        ``problem.gradient`` respectively, which is useful for strategies
-        (e.g. augmented Lagrangian) that augment the objective each iteration.
-
-        When *hess_fn* and *hess_sparsity* are given, the NLP class is
-        dynamically extended with :class:`_HessianMixin` so that cyipopt
-        registers the exact Hessian callbacks.  When omitted, the methods are
-        absent and IPOPT falls back to L-BFGS.
+        ``problem.gradient`` respectively (useful for augmented-Lagrangian
+        strategies that augment the objective each iteration).
         """
-        from .._nlp import _DenseNLP, _SparseNLP, _HessianMixin
-
         p = self.problem
+        _obj = obj_fn if obj_fn is not None else p.objective
+        _grad = grad_fn if grad_fn is not None else p.gradient
+
+        # ------------------------------------------------------------------ #
+        # filterSQP backend                                                    #
+        # ------------------------------------------------------------------ #
+        if self.backend == "filterSQP":
+            try:
+                from pyfiltersqp import _FilterSQPAdapter
+            except ImportError as exc:
+                raise ImportError(
+                    "backend='filterSQP' requires the pyfiltersqp package. "
+                    "Install it or switch to backend='ipopt'."
+                ) from exc
+            # When the strategy uses a sparse jac_fn (returns a flat nnz
+            # array for a fixed COO structure), wrap it to produce a scipy
+            # sparse CSR matrix.  _FilterSQPAdapter slices it into eq/ineq
+            # blocks and passes it directly to OSQP — no densification.
+            _jac_fn = jac_fn
+            if jac_structure is not None:
+                import scipy.sparse as _sp
+                _m, _n = len(cl), p.n
+                _rows = np.asarray(jac_structure[0])
+                _cols = np.asarray(jac_structure[1])
+                _sparse_jac_fn = jac_fn
+                def _jac_fn(x, _r=_rows, _c=_cols, _m=_m, _n=_n,
+                            _fn=_sparse_jac_fn):
+                    vals = np.asarray(_fn(x), dtype=float)
+                    if vals.ndim == 1:
+                        return _sp.csr_matrix((vals, (_r, _c)), shape=(_m, _n))
+                    return vals
+            adapter = _FilterSQPAdapter(
+                n=p.n, m=len(cl),
+                xl=p.xl, xu=p.xu, cl=cl, cu=cu,
+                obj_fn=_obj, grad_fn=_grad,
+                con_fn=con_fn, jac_fn=_jac_fn,
+                solver_options=self.solver_options,
+            )
+            for key, val in self.ipopt_options.items():
+                adapter.add_option(key, val)
+            return adapter
+
+        # ------------------------------------------------------------------ #
+        # scipy backend                                                        #
+        # ------------------------------------------------------------------ #
+        if self.backend == "scipy":
+            from .._scipy_adapter import _ScipyAdapter
+            return _ScipyAdapter(
+                n=p.n, m=len(cl),
+                xl=p.xl, xu=p.xu, cl=cl, cu=cu,
+                obj_fn=_obj, grad_fn=_grad,
+                con_fn=con_fn, jac_fn=jac_fn,
+                jac_rows=jac_structure[0] if jac_structure is not None else None,
+                jac_cols=jac_structure[1] if jac_structure is not None else None,
+                solver_options=self.solver_options,
+            )
+
+        # ------------------------------------------------------------------ #
+        # IPOPT backend (default)                                              #
+        # ------------------------------------------------------------------ #
+        from .._nlp import _DenseNLP, _HessianMixin, _SparseNLP
+
         kwargs = dict(
             n=p.n, m=len(cl), xl=p.xl, xu=p.xu, cl=cl, cu=cu,
-            obj_fn=obj_fn if obj_fn is not None else p.objective,
-            grad_fn=grad_fn if grad_fn is not None else p.gradient,
+            obj_fn=_obj, grad_fn=_grad,
             con_fn=con_fn, jac_fn=jac_fn,
             hess_fn=hess_fn, hess_sparsity=hess_sparsity,
         )
@@ -97,6 +169,10 @@ class BaseStrategy(ABC):
         """True if the problem requests exact JAX Lagrangian Hessians."""
         return getattr(self.problem, "use_jax_hessian", False)
 
+    def _has_manual_hessian(self) -> bool:
+        """True if the problem supplies an exact Lagrangian Hessian callback."""
+        return getattr(self.problem, "lagrangian_hessian", None) is not None
+
     @staticmethod
     def _decode_msg(msg) -> str:
         """Decode cyipopt status_msg (bytes or str)."""
@@ -117,7 +193,12 @@ class BaseStrategy(ABC):
             return np.asarray(values_or_dense, dtype=float)
         rows, cols = sparsity
         dense = np.zeros((n_rows, n))
-        dense[rows, cols] = np.asarray(values_or_dense, dtype=float)
+        _coo_kernel(
+            np.asarray(rows, dtype=np.intp),
+            np.asarray(cols, dtype=np.intp),
+            np.asarray(values_or_dense, dtype=float),
+            dense,
+        )
         return dense
 
     @staticmethod
@@ -310,12 +391,69 @@ class BaseStrategy(ABC):
             parts.append(J if J.ndim == 1 else J.ravel())
         return np.concatenate(parts) if parts else np.empty(0, dtype=float)
 
+    def _timed_solve(
+        self, nlp, x: np.ndarray, warm_dual: dict
+    ) -> tuple[np.ndarray, dict, float]:
+        """Call ``nlp.solve()`` with optional warm-start and return ``(x, info, elapsed)``.
+
+        *elapsed* is the wall-clock seconds spent inside ``nlp.solve()``.
+        Warm-start multipliers are passed only when ``self.dual_warmstart`` is
+        ``True`` (strategies without that attribute always skip warm-start).
+        Emits a ``UserWarning`` when IPOPT returns a non-success status so that
+        outer-loop failures are never silent.
+        """
+        t0 = time.perf_counter()
+        if getattr(self, "dual_warmstart", False) and warm_dual:
+            x, info = nlp.solve(x, **warm_dual)
+        else:
+            x, info = nlp.solve(x)
+        elapsed = time.perf_counter() - t0
+        if info["status"] not in (0, 1, 3):
+            try:
+                status_name = IPOPTStatus(info["status"]).name
+            except ValueError:
+                status_name = str(info["status"])
+            warnings.warn(
+                f"pympcc ({self.name!r}): IPOPT returned {status_name!r} "
+                f"(status {info['status']}). "
+                "Outer loop continues with current iterate as warm-start.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return x, info, elapsed
+
     def _comp_residual(self, x: np.ndarray) -> float:
         """Complementarity infeasibility: max_i |G_i * H_i|."""
         p = self.problem
         G = np.asarray(p.comp_G(x))
         H = np.asarray(p.comp_H(x))
         return float(np.max(np.abs(G * H)))
+
+    def _compute_kkt_iter(
+        self,
+        x: np.ndarray,
+        mult_g: np.ndarray,
+        mpcc_mult_G: np.ndarray,
+        mpcc_mult_H: np.ndarray,
+        mult_x_L,
+        mult_x_U,
+    ) -> float | None:
+        """
+        KKT stationarity residual (∞-norm) for an intermediate iterate.
+
+        Builds a lightweight proxy with only the fields that
+        ``compute_kkt_residual`` actually reads (``x`` and ``mult_g``),
+        avoiding the cost of constructing a full :class:`MPCCResult`.
+        """
+        from types import SimpleNamespace
+        proxy = SimpleNamespace(x=x, mult_g=mult_g)
+        return _compute_kkt_residual(
+            proxy, self.problem,
+            mpcc_mult_G=mpcc_mult_G,
+            mpcc_mult_H=mpcc_mult_H,
+            mult_x_L=mult_x_L,
+            mult_x_U=mult_x_U,
+        )
 
     def _build_standard_constraints(self, x: np.ndarray):
         """

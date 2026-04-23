@@ -1,0 +1,111 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # ------------------------------------------------------------------ #
+  # Lint and type-check                                                  #
+  # ------------------------------------------------------------------ #
+  lint:
+    name: "Lint & type-check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install lint tools
+        run: uv pip install ruff mypy numpy --system
+
+      - name: Ruff
+        run: ruff check pympcc/
+
+      - name: Mypy
+        run: mypy pympcc/ --ignore-missing-imports
+
+  # ------------------------------------------------------------------ #
+  # Core test matrix: Python 3.11 / 3.12, no optional extras           #
+  # ------------------------------------------------------------------ #
+  test:
+    name: "Python ${{ matrix.python-version }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: ci
+          create-args: >-
+            python=${{ matrix.python-version }}
+            cyipopt>=1.3
+            numpy>=1.24
+            pytest>=7.0
+            pytest-cov
+
+      - name: Install package (no-deps — cyipopt already provided by conda)
+        run: pip install -e . --no-deps
+        shell: micromamba-shell {0}
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short --cov=pympcc --cov-report=term-missing
+        shell: micromamba-shell {0}
+
+  # ------------------------------------------------------------------ #
+  # Numba extra: verify JIT kernels compile and give correct results    #
+  # ------------------------------------------------------------------ #
+  test-numba:
+    name: "Python 3.11 + numba"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: ci-numba
+          create-args: >-
+            python=3.11
+            cyipopt>=1.3
+            numpy>=1.24
+            numba>=0.57
+            pytest>=7.0
+            pytest-cov
+
+      - name: Install package (no-deps)
+        run: pip install -e . --no-deps
+        shell: micromamba-shell {0}
+
+      # Warm the Numba cache so the first test run is representative
+      - name: Pre-compile Numba kernels
+        run: |
+          python -c "
+          import numpy as np
+          from pympcc._kernels import (
+              eval_weighted_union, weighted_row_sum,
+              scatter_add, eval_phi_eps_weighted_union, coo_to_dense,
+          )
+          # Trigger JIT compilation with dummy inputs
+          v = np.ones(4); r = np.array([0,1,2,3],dtype=np.intp)
+          m1 = np.array([0,1,-1,3],dtype=np.intp)
+          m2 = np.array([0,-1,2,3],dtype=np.intp)
+          out = np.zeros(4)
+          eval_weighted_union(v, v, v, v, r, m1, m2, out)
+          eval_phi_eps_weighted_union(v, v, v, v, 1e-4, r, m1, m2, out)
+          rows = np.array([0,1],dtype=np.intp); cols = np.array([0,1],dtype=np.intp)
+          dense = np.zeros((2,2)); coo_to_dense(rows, cols, np.ones(2), dense)
+          print('Numba kernels compiled OK')
+          "
+        shell: micromamba-shell {0}
+
+      - name: Run tests (Numba enabled)
+        run: pytest tests/ -v --tb=short --cov=pympcc --cov-report=term-missing
+        shell: micromamba-shell {0}

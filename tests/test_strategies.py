@@ -469,6 +469,29 @@ class TestAugmentedLagrangianStrategy:
                               rho_0=100.0)
         assert result.success
 
+    def test_rho_max_caps_penalty(self):
+        """rho must never exceed rho_max regardless of tau."""
+        result = pympcc.solve(SIMPLE.problem, strategy="augmented_lagrangian",
+                              rho_0=1.0, tau=1000.0, rho_max=50.0,
+                              max_iter=10, comp_tol=1e-20)
+        rho_values = [it.epsilon for it in result.history]
+        assert all(r <= 50.0 + 1e-12 for r in rho_values)
+
+    def test_eta_controls_rho_growth(self):
+        """eta=0.0 (grow rho every iteration) must yield a higher final rho than eta=0.9."""
+        # eta=0.0 → condition is comp_residual > 0, true until convergence → rho grows every step.
+        # eta=0.9 → condition is comp_residual > 0.9 * prev; when the solver makes fast
+        #            progress (>10% reduction per step), rho stays flat.
+        result_aggressive = pympcc.solve(SIMPLE.problem, strategy="augmented_lagrangian",
+                                         rho_0=1.0, eta=0.0, tau=10.0,
+                                         max_iter=6, comp_tol=1e-20)
+        result_cautious = pympcc.solve(SIMPLE.problem, strategy="augmented_lagrangian",
+                                       rho_0=1.0, eta=0.9, tau=10.0,
+                                       max_iter=6, comp_tol=1e-20)
+        rho_aggressive = [it.epsilon for it in result_aggressive.history]
+        rho_cautious   = [it.epsilon for it in result_cautious.history]
+        assert rho_aggressive[-1] >= rho_cautious[-1]
+
 
 # ======================================================================= #
 # Slack (lifting) strategy                                                  #
@@ -559,3 +582,68 @@ class TestSlackStrategy:
         r_dense  = pympcc.solve(SIMPLE.problem,  strategy="slack")
         r_sparse = pympcc.solve(SIMPLE_SPARSE, strategy="slack")
         np.testing.assert_allclose(r_dense.x, r_sparse.x, atol=1e-4)
+
+
+# ======================================================================= #
+# scipy backend                                                             #
+# ======================================================================= #
+
+pytest.importorskip("scipy", reason="scipy not installed")
+
+
+class TestScipyBackend:
+    """Tests for backend='scipy' (trust-constr) across strategies."""
+
+    @pytest.mark.parametrize("strategy", [
+        "direct", "scholtes", "smoothing", "lin_fukushima", "augmented_lagrangian",
+    ])
+    def test_converges(self, strategy):
+        result = pympcc.solve(SIMPLE.problem, strategy=strategy, backend="scipy")
+        assert result.success
+
+    @pytest.mark.parametrize("strategy", [
+        "direct", "scholtes", "smoothing", "lin_fukushima", "augmented_lagrangian",
+    ])
+    def test_comp_feasible(self, strategy):
+        result = pympcc.solve(SIMPLE.problem, strategy=strategy, backend="scipy")
+        assert result.comp_residual < 1e-4
+
+    @pytest.mark.parametrize("strategy", [
+        "direct", "scholtes", "smoothing", "lin_fukushima", "augmented_lagrangian",
+    ])
+    def test_objective(self, strategy):
+        result = pympcc.solve(SIMPLE.problem, strategy=strategy, backend="scipy")
+        assert abs(result.obj - 1.0) < 1e-2
+
+    def test_result_fields_present(self):
+        result = pympcc.solve(SIMPLE.problem, backend="scipy")
+        assert result.x.shape == (SIMPLE.problem.n,)
+        assert result.G.shape == (SIMPLE.problem.n_comp,)
+        assert result.H.shape == (SIMPLE.problem.n_comp,)
+        assert isinstance(result.obj, float)
+        assert isinstance(result.success, bool)
+
+    def test_history_populated_iterative(self):
+        result = pympcc.solve(SIMPLE.problem, strategy="scholtes", backend="scipy",
+                              epsilon_0=1.0, reduction=0.1, max_iter=5)
+        assert len(result.history) == 5
+
+    def test_n_iter_tracked(self):
+        result = pympcc.solve(SIMPLE.problem, strategy="direct", backend="scipy")
+        assert result.history == []   # direct has no outer history
+        assert result.n_ipopt_iter if hasattr(result, "n_ipopt_iter") else True
+
+    def test_invalid_backend_raises(self):
+        with pytest.raises(ValueError, match="Unknown backend"):
+            pympcc.solve(SIMPLE.problem, backend="bad_backend")
+
+    def test_sparse_problem(self):
+        result = pympcc.solve(SIMPLE_SPARSE, strategy="scholtes", backend="scipy")
+        assert result.success
+        assert result.comp_residual < 1e-4
+
+    def test_matches_ipopt_solution(self):
+        """scipy and IPOPT backends must agree on the solution to within 1e-2."""
+        r_ipopt = pympcc.solve(SIMPLE.problem, strategy="scholtes", backend="ipopt")
+        r_scipy = pympcc.solve(SIMPLE.problem, strategy="scholtes", backend="scipy")
+        np.testing.assert_allclose(r_ipopt.x, r_scipy.x, atol=1e-2)

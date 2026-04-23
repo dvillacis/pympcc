@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._base import BaseStrategy
-from ..result import IterationInfo, MPCCResult
-from .._stationarity import classify_stationarity
 from .._kernels import scatter_add as _scatter_add
+from .._stationarity import classify_stationarity, compute_kkt_residual
+from ..result import IterationInfo, MPCCResult
+from ._base import BaseStrategy
 
 _INF = 2e19
 
@@ -18,6 +18,7 @@ _DEFAULTS = dict(
     max_iter=20,
     comp_tol=1e-8,
     dual_warmstart=True,
+    stagnation_iters=5,
 )
 
 
@@ -68,6 +69,12 @@ class AugmentedLagrangianStrategy(BaseStrategy):
     dual_warmstart : bool
         Warm-start IPOPT dual variables between outer iterations
         (default ``True``).
+    stagnation_iters : int
+        Maximum number of consecutive outer iterations allowed once ``ρ``
+        has reached ``rho_max`` without the complementarity residual
+        improving (i.e. ``comp_residual > eta * prev_comp_residual``).
+        Prevents wasting iterations when the penalty cap prevents further
+        progress (default 5).
 
     Notes
     -----
@@ -85,6 +92,7 @@ class AugmentedLagrangianStrategy(BaseStrategy):
     """
 
     name = "augmented_lagrangian"
+    _VALID_OPTIONS: frozenset = frozenset(_DEFAULTS)
 
     def _build_jax_hessian(self, mu_ref: list, rho_ref: list):
         """
@@ -154,7 +162,10 @@ class AugmentedLagrangianStrategy(BaseStrategy):
         return hess_fn, (rows, cols)
 
     def __init__(self, problem, ipopt_options: dict, **kwargs) -> None:
-        super().__init__(problem, ipopt_options, callback=kwargs.pop("callback", None))
+        super().__init__(problem, ipopt_options,
+                         backend=kwargs.pop("backend", "ipopt"),
+                         solver_options=kwargs.pop("solver_options", None),
+                         callback=kwargs.pop("callback", None))
         opts = {**_DEFAULTS, **kwargs}
         self.rho_0: float = opts["rho_0"]
         self.rho_max: float = opts["rho_max"]
@@ -163,6 +174,7 @@ class AugmentedLagrangianStrategy(BaseStrategy):
         self.max_iter: int = opts["max_iter"]
         self.comp_tol: float = opts["comp_tol"]
         self.dual_warmstart: bool = bool(opts["dual_warmstart"])
+        self.stagnation_iters: int = int(opts["stagnation_iters"])
 
     def solve(self) -> MPCCResult:
         p = self.problem
@@ -249,9 +261,11 @@ class AugmentedLagrangianStrategy(BaseStrategy):
         # Pre-allocate gradient scatter buffer for the sparse path.
         if union_maps is not None:
             (r_u_al, c_u_al), map1_al, map2_al = union_maps
-            _grad_union_buf = np.empty(len(r_u_al))
+            _grad_union_buf   = np.empty(len(r_u_al))
+            _grad_scatter_buf = np.zeros(p.n)
         else:
             r_u_al = c_u_al = map1_al = map2_al = _grad_union_buf = None
+            _grad_scatter_buf = None
 
         def obj_al(x):
             mu_k, rho_k = mu_ref[0], rho_ref[0]
@@ -277,8 +291,9 @@ class AugmentedLagrangianStrategy(BaseStrategy):
                     v_G, v_H, lam * H, lam * G,
                     r_u_al, map1_al, map2_al, _grad_union_buf,
                 )
-                d_al = np.zeros(p.n)
-                _scatter_add(d_al, c_u_al, _grad_union_buf)
+                _grad_scatter_buf[:] = 0.0
+                _scatter_add(_grad_scatter_buf, c_u_al, _grad_union_buf)
+                d_al = _grad_scatter_buf
             else:
                 # Dense path: two BLAS DGEMV calls (no large intermediates).
                 _, _, JG, JH = self._build_comp_jacobians(x)
@@ -288,21 +303,49 @@ class AugmentedLagrangianStrategy(BaseStrategy):
         # ------------------------------------------------------------------ #
         # Outer loop                                                           #
         # ------------------------------------------------------------------ #
+        # Build the NLP once — obj_al/grad_al read mu_ref/rho_ref dynamically,
+        # and cl/cu are static (complementarity lives in the objective, not
+        # constraints).
+        nlp = self._build_nlp(cl, cu, constraints, jacobian, jac_structure,
+                              obj_fn=obj_al, grad_fn=grad_al,
+                              hess_fn=hess_fn, hess_sparsity=hess_sparsity)
+
         history: list[IterationInfo] = []
         x = p.x0.copy()
         last_info: dict = {}
         warm_dual: dict = {}
         prev_comp_residual = np.inf
+        stagnation_count = 0
+        total_time: float = 0.0
 
-        for _ in range(self.max_iter):
-            nlp = self._build_nlp(cl, cu, constraints, jacobian, jac_structure,
-                                  obj_fn=obj_al, grad_fn=grad_al,
-                                  hess_fn=hess_fn, hess_sparsity=hess_sparsity)
-            if self.dual_warmstart and warm_dual:
+        # Seed the adaptive inner tolerance from the complementarity residual
+        # at x0.  If x0 is already complementary, fall back to 1.0 so the
+        # first inner solve is still solved loosely.
+        _G0 = np.asarray(p.comp_G(x))
+        _H0 = np.asarray(p.comp_H(x))
+        _init_comp = max(float(np.max(np.abs(_G0 * _H0))), 1.0)
+
+        for k in range(self.max_iter):
+            nlp.n_ipopt_iter = 0
+            if k == 1 and self.dual_warmstart:
                 nlp.add_option("warm_start_init_point", "yes")
-                x, last_info = nlp.solve(x, **warm_dual)
-            else:
-                x, last_info = nlp.solve(x)
+            # Adaptive inner tolerance: mirror the Scholtes pattern — no need
+            # to solve tighter than the current complementarity gap warrants.
+            # On the first iteration prev_comp_residual is inf, so fall back
+            # to the x0 residual; from iteration 1 onwards use the previous
+            # outer residual.  The penalty update logic is unaffected because
+            # it still reads the unmodified prev_comp_residual (inf on k=0).
+            #
+            # The upper cap of 1e-6 ensures the final iterate (which may be
+            # the very first solve when AL converges in one step) is solved
+            # accurately enough for the KKT residual to be meaningful.
+            _comp_for_tol = (
+                _init_comp if np.isinf(prev_comp_residual) else prev_comp_residual
+            )
+            _tol_user = self.ipopt_options.get("tol", 1e-8)
+            nlp.add_option("tol", max(_tol_user, min(_comp_for_tol * 1e-2, 1e-6)))
+            x, last_info, iter_time = self._timed_solve(nlp, x, warm_dual)
+            total_time += iter_time
             if self.dual_warmstart:
                 warm_dual = {
                     "lagrange": last_info["mult_g"],
@@ -315,6 +358,16 @@ class AugmentedLagrangianStrategy(BaseStrategy):
             comp_residual = float(np.max(np.abs(G * H)))
             comp_residual_mean = float(np.mean(np.abs(G * H)))
 
+            _off = n_g + n_h
+            _lam_G = last_info["mult_g"][_off       : _off + n_c]
+            _lam_H = last_info["mult_g"][_off + n_c : _off + 2 * n_c]
+            _kkt = self._compute_kkt_iter(
+                x, last_info["mult_g"],
+                mpcc_mult_G=_lam_G + mu_ref[0] * H,
+                mpcc_mult_H=_lam_H + mu_ref[0] * G,
+                mult_x_L=last_info.get("mult_x_L"),
+                mult_x_U=last_info.get("mult_x_U"),
+            )
             history.append(IterationInfo(
                 epsilon=rho_ref[0],          # store ρ in the epsilon slot
                 x=x.copy(),
@@ -324,6 +377,8 @@ class AugmentedLagrangianStrategy(BaseStrategy):
                 comp_residual=comp_residual,
                 comp_residual_mean=comp_residual_mean,
                 n_ipopt_iter=nlp.n_ipopt_iter,
+                iter_time=iter_time,
+                kkt_residual=_kkt,
             ))
             if self.callback is not None:
                 self.callback(len(history) - 1, history[-1])
@@ -331,9 +386,20 @@ class AugmentedLagrangianStrategy(BaseStrategy):
             # Multiplier update: μ ← max(0, μ + ρ * G*H)
             mu_ref[0] = np.maximum(0.0, mu_ref[0] + rho_ref[0] * G * H)
 
-            # Penalty update: grow ρ if not making enough progress
-            if comp_residual > self.eta * prev_comp_residual:
+            # Penalty update: grow ρ if not making enough progress.
+            _no_progress = comp_residual > self.eta * prev_comp_residual
+            if _no_progress:
                 rho_ref[0] = min(rho_ref[0] * self.tau, self.rho_max)
+
+            # Stagnation detection: once ρ is capped at rho_max and the
+            # complementarity residual is not improving, further outer
+            # iterations cannot help — terminate early.
+            if rho_ref[0] >= self.rho_max and _no_progress:
+                stagnation_count += 1
+                if stagnation_count >= self.stagnation_iters:
+                    break
+            else:
+                stagnation_count = 0
 
             prev_comp_residual = comp_residual
             if comp_residual < self.comp_tol:
@@ -353,8 +419,24 @@ class AugmentedLagrangianStrategy(BaseStrategy):
             comp_residual_mean=float(np.mean(np.abs(G * H))),
             success=last_info["status"] in (0, 1, 3),
             strategy=self.name,
+            solve_time=total_time,
             history=history,
             mult_g=last_info.get("mult_g"),
         )
         result.stationarity = classify_stationarity(result, self.problem)
+        # AL layout: [g, h, G, H] (no G*H constraint — it lives in the
+        # objective via the PHR penalty).  The penalty gradient contributes
+        # μ_G = λ_G + μ_AL ⊙ H  and  μ_H = λ_H + μ_AL ⊙ G.
+        # mu_ref[0] holds the updated penalty multiplier from the last outer
+        # iteration which equals (ρ*G*H + μ_prev) → μ_prev·H contribution.
+        _off = n_g + n_h
+        lam_G = last_info["mult_g"][_off       : _off + n_c]
+        lam_H = last_info["mult_g"][_off + n_c : _off + 2 * n_c]
+        result.kkt_residual = compute_kkt_residual(
+            result, self.problem,
+            mpcc_mult_G=lam_G + mu_ref[0] * result.H,
+            mpcc_mult_H=lam_H + mu_ref[0] * result.G,
+            mult_x_L=last_info.get("mult_x_L"),
+            mult_x_U=last_info.get("mult_x_U"),
+        )
         return result

@@ -15,8 +15,9 @@ and are safe to call from multiple threads simultaneously.
 """
 from __future__ import annotations
 
-import numpy as np
 from typing import Callable, Literal
+
+import numpy as np
 
 _DEFAULT_H: float = float(np.sqrt(np.finfo(float).eps))  # ≈ 1.4901e-8
 FDMode = Literal["forward", "central"]

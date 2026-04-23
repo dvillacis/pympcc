@@ -6,6 +6,8 @@ from typing import Optional
 
 import numpy as np
 
+__all__ = ["IPOPTStatus", "IterationInfo", "MPCCResult"]
+
 
 class IPOPTStatus(IntEnum):
     """IPOPT solver return codes (integer values match cyipopt's status field)."""
@@ -40,6 +42,8 @@ class IterationInfo:
     comp_residual: float       # max_i |G_i * H_i|
     comp_residual_mean: float  # mean_i |G_i * H_i|
     n_ipopt_iter: int          # IPOPT iterations in this NLP solve
+    iter_time: float           # wall-clock seconds for this NLP solve
+    kkt_residual: Optional[float] = None  # MPCC stationarity residual (∞-norm)
 
 
 @dataclass
@@ -72,6 +76,11 @@ class MPCCResult:
         1 (Solved_To_Acceptable_Level).
     strategy : str
         Name of the reformulation strategy used.
+    solve_time : float or None
+        Sum of wall-clock seconds spent inside each ``nlp.solve()`` call.
+        Excludes strategy setup (NLP construction, sparsity computation),
+        callback invocations, and post-solve stationarity classification.
+        ``None`` when not measured (e.g. results constructed programmatically).
     history : list[IterationInfo]
         Per-iteration diagnostics for iterative strategies (Scholtes,
         smoothing).  Empty for the direct strategy.
@@ -88,13 +97,17 @@ class MPCCResult:
     success: bool
     strategy: str
     history: list[IterationInfo] = field(default_factory=list)
+    solve_time: Optional[float] = None
     mult_g: Optional[np.ndarray] = field(default=None)
     stationarity: str = "unknown"
+    kkt_residual: Optional[float] = None
 
     def __repr__(self) -> str:  # pragma: no cover
+        kkt_str = (f", kkt_residual={self.kkt_residual:.3e}"
+                   if self.kkt_residual is not None else "")
         return (
             f"MPCCResult(strategy={self.strategy!r}, success={self.success}, "
             f"obj={self.obj:.6g}, comp_residual={self.comp_residual:.3e}, "
             f"comp_residual_mean={self.comp_residual_mean:.3e}, "
-            f"stationarity={self.stationarity!r}, status={self.status})"
+            f"stationarity={self.stationarity!r}{kkt_str}, status={self.status})"
         )

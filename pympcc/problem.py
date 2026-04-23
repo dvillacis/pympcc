@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Optional, Union
 
 import numpy as np
+
+__all__ = ["MPCCProblem"]
 
 
 @dataclass
@@ -128,6 +130,44 @@ class MPCCProblem:
     # ------------------------------------------------------------------ #
     use_jax_hessian: bool = False
     jax_sparsity_tol: float = 1e-12
+
+    # ------------------------------------------------------------------ #
+    # Manual Lagrangian Hessian (optional)                                 #
+    # ------------------------------------------------------------------ #
+    # When provided, used in place of JAX autodiff or L-BFGS.
+    #
+    # --- lagrangian_hessian / lagrangian_hessian_sparsity ---
+    # Compatible strategies: direct, scholtes, lin_fukushima.
+    # NOT compatible with augmented_lagrangian (PHR penalty adds objective
+    # Hessian terms not captured here) or smoothing (phi_eps Hessian).
+    #
+    # Signature:
+    #   lagrangian_hessian(x, lagrange, obj_factor) -> ndarray, shape (nnz,)
+    #
+    # The `lagrange` vector follows the shared ordering for these strategies:
+    #   [lam_g (n_ineq), lam_h (n_eq), lam_G (n_comp), lam_H (n_comp),
+    #    lam_GH (n_comp, optional)]
+    # where lam_GPH in lin_fukushima (G+H block) is beyond lam_GH and has
+    # zero Hessian contribution (G+H is linear, so it is silently ignored).
+    #
+    # --- lagrangian_hessian_slack / lagrangian_hessian_slack_sparsity ---
+    # For the slack strategy only.  The slack strategy lifts the variable
+    # space to z = [x (n), s_G (n_comp), s_H (n_comp)], so the Hessian
+    # is (n+2*n_comp) × (n+2*n_comp).  The callable receives the full
+    # lifted vector z.
+    #
+    # Signature:
+    #   lagrangian_hessian_slack(z, lagrange, obj_factor) -> ndarray, shape (nnz,)
+    #
+    # The `lagrange` ordering for slack is:
+    #   [lam_g, lam_h, lam_{G-sG}, lam_{H-sH}, lam_{sG·sH}]
+    #
+    # lagrangian_hessian_sparsity / lagrangian_hessian_slack_sparsity:
+    #   COO (rows, cols), 0-based, lower triangle (row >= col).
+    lagrangian_hessian: Optional[Callable] = None
+    lagrangian_hessian_sparsity: Optional[tuple] = None
+    lagrangian_hessian_slack: Optional[Callable] = None
+    lagrangian_hessian_slack_sparsity: Optional[tuple] = None
 
     # ------------------------------------------------------------------ #
     # Optional sparse Jacobian structures (COO format, 0-based indices)   #
@@ -279,8 +319,31 @@ class MPCCProblem:
             raise ValueError(f"xu must have shape ({self.n},)")
         if not np.all(self.xl <= self.xu):
             raise ValueError("xl must be <= xu element-wise")
+        # Warn when x0 violates finite bounds — IPOPT projects x0 internally.
+        finite_lb = np.isfinite(self.xl)
+        finite_ub = np.isfinite(self.xu)
+        viol = np.where(
+            (finite_lb & (self.x0 < self.xl)) | (finite_ub & (self.x0 > self.xu))
+        )[0]
+        if viol.size:
+            details = ", ".join(
+                f"x0[{i}]={self.x0[i]:.4g} not in [{self.xl[i]:.4g}, {self.xu[i]:.4g}]"
+                for i in viol[:5]
+            )
+            if viol.size > 5:
+                details += f" ... ({viol.size} total)"
+            warnings.warn(
+                f"x0 violates bounds at {viol.size} index(es): {details}",
+                UserWarning,
+                stacklevel=3,
+            )
         if self.n_comp < 1:
             raise ValueError("n_comp must be >= 1")
+
+        if not np.isfinite(self.objective(x0)):
+            raise ValueError("objective(x0) returned non-finite value (NaN or Inf)")
+        if not np.all(np.isfinite(self.gradient(x0))):
+            raise ValueError("gradient(x0) returned non-finite values (NaN or Inf)")
 
         self._check_shape("comp_G", self.comp_G, x0, (self.n_comp,))
         if self.comp_G_jacobian_sparsity is None:
@@ -348,6 +411,10 @@ class MPCCProblem:
                     f"{_name}(x0) with sparsity must return shape ({len(_rows)},),"
                     f" got {_vals.shape}"
                 )
+            if not np.all(np.isfinite(_vals)):
+                raise ValueError(
+                    f"{_name}(x0) returned non-finite sparse values (NaN or Inf)"
+                )
 
     @staticmethod
     def _check_shape(name: str, fn: Callable, x0: np.ndarray,
@@ -356,4 +423,8 @@ class MPCCProblem:
         if result.shape != expected:
             raise ValueError(
                 f"{name}(x0) must have shape {expected}, got {result.shape}"
+            )
+        if not np.all(np.isfinite(result)):
+            raise ValueError(
+                f"{name}(x0) returned non-finite values (NaN or Inf)"
             )

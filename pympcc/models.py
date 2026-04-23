@@ -37,6 +37,8 @@ import numpy as np
 
 from .problem import MPCCProblem
 
+__all__ = ["StructuredMPCC"]
+
 
 @dataclass
 class StructuredMPCC:
