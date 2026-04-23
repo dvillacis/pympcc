@@ -4,10 +4,6 @@ from __future__ import annotations
 import logging
 from typing import Callable, Literal, Optional, Union
 
-BackendName = Literal["ipopt", "filterSQP", "scipy"]
-
-__all__ = ["MPCCSolver", "solve"]
-
 from ._kernels import HAS_NUMBA
 from .models import StructuredMPCC
 from .problem import MPCCProblem
@@ -19,6 +15,9 @@ from .strategies.scholtes import ScholtesStrategy
 from .strategies.slack import SlackStrategy
 from .strategies.smoothing import SmoothingStrategy
 
+__all__ = ["MPCCSolver", "solve"]
+
+BackendName = Literal["ipopt", "filterSQP", "scipy"]
 ProblemLike = Union[MPCCProblem, StructuredMPCC]
 
 
