@@ -311,6 +311,7 @@ class MPCCProblem:
 
     def _validate(self) -> None:
         x0 = self.x0
+        assert self.xl is not None and self.xu is not None  # set by __post_init__
         if x0.shape != (self.n,):
             raise ValueError(f"x0 must have shape ({self.n},), got {x0.shape}")
         if self.xl.shape != (self.n,):
@@ -342,16 +343,16 @@ class MPCCProblem:
 
         if not np.isfinite(self.objective(x0)):
             raise ValueError("objective(x0) returned non-finite value (NaN or Inf)")
-        if not np.all(np.isfinite(self.gradient(x0))):
+        if not np.all(np.isfinite(self.gradient(x0))):  # type: ignore[operator]
             raise ValueError("gradient(x0) returned non-finite values (NaN or Inf)")
 
         self._check_shape("comp_G", self.comp_G, x0, (self.n_comp,))
         if self.comp_G_jacobian_sparsity is None:
-            self._check_shape("comp_G_jacobian", self.comp_G_jacobian, x0,
+            self._check_shape("comp_G_jacobian", self.comp_G_jacobian, x0,  # type: ignore[arg-type]
                               (self.n_comp, self.n))
         self._check_shape("comp_H", self.comp_H, x0, (self.n_comp,))
         if self.comp_H_jacobian_sparsity is None:
-            self._check_shape("comp_H_jacobian", self.comp_H_jacobian, x0,
+            self._check_shape("comp_H_jacobian", self.comp_H_jacobian, x0,  # type: ignore[arg-type]
                               (self.n_comp, self.n))
 
         if self.n_ineq > 0:
@@ -362,7 +363,7 @@ class MPCCProblem:
             self._check_shape("ineq_constraints", self.ineq_constraints, x0,
                                (self.n_ineq,))
             if self.ineq_jacobian_sparsity is None:
-                self._check_shape("ineq_jacobian", self.ineq_jacobian, x0,
+                self._check_shape("ineq_jacobian", self.ineq_jacobian, x0,  # type: ignore[arg-type]
                                    (self.n_ineq, self.n))
 
         if self.n_eq > 0:
@@ -373,7 +374,7 @@ class MPCCProblem:
             self._check_shape("eq_constraints", self.eq_constraints, x0,
                                (self.n_eq,))
             if self.eq_jacobian_sparsity is None:
-                self._check_shape("eq_jacobian", self.eq_jacobian, x0,
+                self._check_shape("eq_jacobian", self.eq_jacobian, x0,  # type: ignore[arg-type]
                                    (self.n_eq, self.n))
 
         # Sparse structure validation
@@ -405,7 +406,7 @@ class MPCCProblem:
                 raise ValueError(
                     f"{_name}_sparsity: col indices out of range [0, {self.n})"
                 )
-            _vals = np.asarray(_fn(x0))
+            _vals = np.asarray(_fn(x0))  # type: ignore[operator]
             if _vals.shape != (len(_rows),):
                 raise ValueError(
                     f"{_name}(x0) with sparsity must return shape ({len(_rows)},),"

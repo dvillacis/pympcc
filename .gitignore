@@ -19,3 +19,5 @@ wheels/
 CLAUDE.md
 
 .ruff_cache/
+
+.mypy_cache/

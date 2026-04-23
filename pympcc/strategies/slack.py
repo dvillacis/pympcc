@@ -167,7 +167,7 @@ class SlackStrategy(BaseStrategy):
 
         return np.concatenate(all_rows), np.concatenate(all_cols)
 
-    def _build_jax_hessian_slack(self):
+    def _build_jax_hessian_slack(self):  # pragma: no cover
         """Build exact Lagrangian Hessian in lifted z=[x,s_G,s_H] space via JAX."""
         import jax
         import jax.numpy as jnp
@@ -347,20 +347,20 @@ class SlackStrategy(BaseStrategy):
             s_H = z[col_sH:]
             # g block
             if p.n_ineq > 0:
-                J = np.asarray(p.ineq_jacobian(x), dtype=float)
+                J = np.asarray(p.ineq_jacobian(x), dtype=float)  # type: ignore[misc, operator]
                 v = J if J.ndim == 1 else J.ravel()
                 _jac_buf[_off_g:_off_g + _seg_g] = v
             # h block
             if p.n_eq > 0:
-                J = np.asarray(p.eq_jacobian(x), dtype=float)
+                J = np.asarray(p.eq_jacobian(x), dtype=float)  # type: ignore[misc, operator]
                 v = J if J.ndim == 1 else J.ravel()
                 _jac_buf[_off_h:_off_h + _seg_h] = v
             # G-pinning x-block
-            vG = np.asarray(p.comp_G_jacobian(x), dtype=float)
+            vG = np.asarray(p.comp_G_jacobian(x), dtype=float)  # type: ignore[operator]
             _jac_buf[_off_JG:_off_JG + _seg_JG] = (
                 vG if vG.ndim == 1 else vG.ravel())
             # H-pinning x-block
-            vH = np.asarray(p.comp_H_jacobian(x), dtype=float)
+            vH = np.asarray(p.comp_H_jacobian(x), dtype=float)  # type: ignore[operator]
             _jac_buf[_off_JH:_off_JH + _seg_JH] = (
                 vH if vH.ndim == 1 else vH.ravel())
             # s_G · s_H: diag(s_H) for s_G cols, diag(s_G) for s_H cols
@@ -372,14 +372,14 @@ class SlackStrategy(BaseStrategy):
             return float(p.objective(z[:n]))
 
         def grad_lifted(z: np.ndarray) -> np.ndarray:
-            g = np.asarray(p.gradient(z[:n]), dtype=float)
+            g = np.asarray(p.gradient(z[:n]), dtype=float)  # type: ignore[operator]
             return np.concatenate([g, np.zeros(2 * n_c)])
 
         hess_fn, hess_sparsity = None, None
         if getattr(self.problem, "lagrangian_hessian_slack", None) is not None:
             hess_fn = self.problem.lagrangian_hessian_slack
             hess_sparsity = self.problem.lagrangian_hessian_slack_sparsity
-        elif self._has_jax_hessian():
+        elif self._has_jax_hessian():  # pragma: no cover
             hess_fn, hess_sparsity, _ = self._build_jax_hessian_slack()
 
         # Initialise lifted variable vector

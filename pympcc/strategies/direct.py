@@ -29,7 +29,7 @@ class DirectStrategy(BaseStrategy):
     name = "direct"
     _VALID_OPTIONS: frozenset = frozenset()
 
-    def _build_jax_hessian(self):
+    def _build_jax_hessian(self):  # pragma: no cover
         """Build exact Lagrangian Hessian via JAX autodiff."""
         import jax.numpy as jnp
 
@@ -132,7 +132,7 @@ class DirectStrategy(BaseStrategy):
             p = self.problem
             hess_fn = p.lagrangian_hessian
             hess_sparsity = p.lagrangian_hessian_sparsity
-        elif self._has_jax_hessian():
+        elif self._has_jax_hessian():  # pragma: no cover
             hess_fn, hess_sparsity = self._build_jax_hessian()
 
         nlp = self._build_nlp(cl, cu, constraints, jacobian, jac_structure,

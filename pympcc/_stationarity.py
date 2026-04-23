@@ -258,18 +258,18 @@ def compute_kkt_residual(
     x = result.x
     n_g, n_h = p.n_ineq, p.n_eq
 
-    r = np.asarray(p.gradient(x), dtype=float).copy()
+    r = np.asarray(p.gradient(x), dtype=float).copy()  # type: ignore[operator]
     if mult_x_L is not None:
         r -= mult_x_L[:p.n]
     if mult_x_U is not None:
         r += mult_x_U[:p.n]
 
     if n_g:
-        r += _jac_T_vec(p.ineq_jacobian(x), p.ineq_jacobian_sparsity, n_g, p.n, result.mult_g[:n_g])
+        r += _jac_T_vec(p.ineq_jacobian(x), p.ineq_jacobian_sparsity, n_g, p.n, result.mult_g[:n_g])  # type: ignore[misc, operator]
     if n_h:
-        r += _jac_T_vec(p.eq_jacobian(x), p.eq_jacobian_sparsity, n_h, p.n, result.mult_g[n_g : n_g + n_h])
+        r += _jac_T_vec(p.eq_jacobian(x), p.eq_jacobian_sparsity, n_h, p.n, result.mult_g[n_g : n_g + n_h])  # type: ignore[misc, operator]
 
-    r += _jac_T_vec(p.comp_G_jacobian(x), p.comp_G_jacobian_sparsity, p.n_comp, p.n, mpcc_mult_G)
-    r += _jac_T_vec(p.comp_H_jacobian(x), p.comp_H_jacobian_sparsity, p.n_comp, p.n, mpcc_mult_H)
+    r += _jac_T_vec(p.comp_G_jacobian(x), p.comp_G_jacobian_sparsity, p.n_comp, p.n, mpcc_mult_G)  # type: ignore[operator]
+    r += _jac_T_vec(p.comp_H_jacobian(x), p.comp_H_jacobian_sparsity, p.n_comp, p.n, mpcc_mult_H)  # type: ignore[operator]
 
     return float(np.max(np.abs(r)))

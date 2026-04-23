@@ -359,6 +359,7 @@ class StructuredMPCC:
 
     def _validate(self) -> None:
         x0, n = self.x0, self.n
+        assert self.xl is not None and self.xu is not None  # set in __post_init__
 
         if x0.shape != (n,):
             raise ValueError(f"x0 must have shape ({n},), got {x0.shape}")
@@ -373,16 +374,17 @@ class StructuredMPCC:
 
         # Complementarity
         MPCCProblem._check_shape("comp_G", self.comp_G, x0, (self.n_comp,))
-        MPCCProblem._check_shape("comp_G_jacobian", self.comp_G_jacobian, x0,
+        MPCCProblem._check_shape("comp_G_jacobian", self.comp_G_jacobian, x0,  # type: ignore[arg-type]
                                  (self.n_comp, n))
         MPCCProblem._check_shape("comp_H", self.comp_H, x0, (self.n_comp,))
-        MPCCProblem._check_shape("comp_H_jacobian", self.comp_H_jacobian, x0,
+        MPCCProblem._check_shape("comp_H_jacobian", self.comp_H_jacobian, x0,  # type: ignore[arg-type]
                                  (self.n_comp, n))
 
         # Linear equalities
         if (self.A_eq is None) != (self.b_eq is None):
             raise ValueError("A_eq and b_eq must both be provided or both be None")
         if self.A_eq is not None:
+            assert self.b_eq is not None  # checked by paired test above
             if self.A_eq.ndim != 2 or self.A_eq.shape[1] != n:
                 raise ValueError(
                     f"A_eq must have shape (m, {n}), got {self.A_eq.shape}"
@@ -399,7 +401,7 @@ class StructuredMPCC:
                     "eq_nl and jac_eq_nl are required when n_nl_eq > 0"
                 )
             MPCCProblem._check_shape("eq_nl", self.eq_nl, x0, (self.n_nl_eq,))
-            MPCCProblem._check_shape("jac_eq_nl", self.jac_eq_nl, x0,
+            MPCCProblem._check_shape("jac_eq_nl", self.jac_eq_nl, x0,  # type: ignore[arg-type]
                                      (self.n_nl_eq, n))
 
         # Linear inequalities
@@ -408,6 +410,7 @@ class StructuredMPCC:
                 "A_ineq and b_ineq must both be provided or both be None"
             )
         if self.A_ineq is not None:
+            assert self.b_ineq is not None  # checked by paired test above
             if self.A_ineq.ndim != 2 or self.A_ineq.shape[1] != n:
                 raise ValueError(
                     f"A_ineq must have shape (m, {n}), got {self.A_ineq.shape}"
@@ -426,7 +429,7 @@ class StructuredMPCC:
                 )
             MPCCProblem._check_shape("ineq_nl", self.ineq_nl, x0,
                                      (self.n_nl_ineq,))
-            MPCCProblem._check_shape("jac_ineq_nl", self.jac_ineq_nl, x0,
+            MPCCProblem._check_shape("jac_ineq_nl", self.jac_ineq_nl, x0,  # type: ignore[arg-type]
                                      (self.n_nl_ineq, n))
 
     # ------------------------------------------------------------------ #
@@ -453,8 +456,8 @@ class StructuredMPCC:
             n=self.n,
             n_comp=self.n_comp,
             x0=self.x0.copy(),
-            xl=self.xl.copy(),
-            xu=self.xu.copy(),
+            xl=self.xl.copy(),  # type: ignore[union-attr]
+            xu=self.xu.copy(),  # type: ignore[union-attr]
             objective=self.objective,
             gradient=self.gradient,
             comp_G=self.comp_G,

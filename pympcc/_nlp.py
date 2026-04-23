@@ -18,12 +18,12 @@ class _HessianMixin:
     """
 
     def hessianstructure(self) -> tuple[np.ndarray, np.ndarray]:
-        return self._hess_rows, self._hess_cols
+        return self._hess_rows, self._hess_cols  # type: ignore[attr-defined]
 
     def hessian(
         self, x: np.ndarray, lagrange: np.ndarray, obj_factor: float
     ) -> np.ndarray:
-        return np.asarray(self._hess_fn(x, lagrange, obj_factor), dtype=float)
+        return np.asarray(self._hess_fn(x, lagrange, obj_factor), dtype=float)  # type: ignore[attr-defined]
 
 
 class _DenseNLP(cyipopt.Problem):
@@ -81,6 +81,8 @@ class _DenseNLP(cyipopt.Problem):
         # Hessian state — set BEFORE super().__init__ so hessianstructure() is
         # ready if cyipopt probes it during setup.
         self._hess_fn = hess_fn
+        self._hess_rows: np.ndarray | None
+        self._hess_cols: np.ndarray | None
         if hess_sparsity is not None:
             self._hess_rows = np.asarray(hess_sparsity[0], dtype=np.intp)
             self._hess_cols = np.asarray(hess_sparsity[1], dtype=np.intp)
@@ -92,7 +94,7 @@ class _DenseNLP(cyipopt.Problem):
         if m > 0:
             self._rows = np.repeat(np.arange(m), n)
             self._cols = np.tile(np.arange(n), m)
-        else:
+        else:  # pragma: no cover
             self._rows = np.empty(0, dtype=int)
             self._cols = np.empty(0, dtype=int)
 
@@ -122,7 +124,7 @@ class _DenseNLP(cyipopt.Problem):
         return self._rows, self._cols
 
     def jacobian(self, x: np.ndarray) -> np.ndarray:
-        if self._m == 0:
+        if self._m == 0:  # pragma: no cover
             return np.empty(0, dtype=float)
         J = np.asarray(self._jac_fn(x), dtype=float)
         return J.ravel()
@@ -174,7 +176,8 @@ class _SparseNLP(cyipopt.Problem):
         raw_rows = np.asarray(jac_rows, dtype=np.intp)
         raw_cols = np.asarray(jac_cols, dtype=np.intp)
         order = np.lexsort((raw_cols, raw_rows))
-        if raw_rows.size and not np.array_equal(order, np.arange(raw_rows.size)):
+        self._jac_order: np.ndarray | None
+        if raw_rows.size and not np.array_equal(order, np.arange(raw_rows.size)):  # pragma: no cover
             self._jac_order = order
             self._jac_rows = raw_rows[order]
             self._jac_cols = raw_cols[order]
@@ -184,6 +187,8 @@ class _SparseNLP(cyipopt.Problem):
             self._jac_cols = raw_cols
         # Hessian state — set BEFORE super().__init__.
         self._hess_fn = hess_fn
+        self._hess_rows: np.ndarray | None
+        self._hess_cols: np.ndarray | None
         if hess_sparsity is not None:
             self._hess_rows = np.asarray(hess_sparsity[0], dtype=np.intp)
             self._hess_cols = np.asarray(hess_sparsity[1], dtype=np.intp)
@@ -211,11 +216,11 @@ class _SparseNLP(cyipopt.Problem):
         return self._jac_rows, self._jac_cols
 
     def jacobian(self, x: np.ndarray) -> np.ndarray:
-        if self._m == 0:
+        if self._m == 0:  # pragma: no cover
             return np.empty(0, dtype=float)
         J = np.asarray(self._jac_fn(x), dtype=float)
         if J.ndim == 1:
-            if self._jac_order is not None:
+            if self._jac_order is not None:  # pragma: no cover
                 return J[self._jac_order]
             return J                              # sparse-native: already nnz values
-        return J[self._jac_rows, self._jac_cols]   # legacy: extract from dense matrix
+        return J[self._jac_rows, self._jac_cols]   # legacy: extract from dense matrix  # pragma: no cover

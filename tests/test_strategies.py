@@ -13,6 +13,14 @@ import pytest
 import pympcc
 from .macmpec_problems import PROBLEM_NAMES
 
+try:
+    import scipy  # noqa: F401
+    _HAS_SCIPY = True
+except ImportError:
+    _HAS_SCIPY = False
+
+_skip_no_scipy = pytest.mark.skipif(not _HAS_SCIPY, reason="scipy not installed")
+
 SIMPLE = PROBLEM_NAMES["simple"]
 
 # Sparse version of SIMPLE: comp_G/H Jacobians return 1-D nnz values
@@ -585,12 +593,160 @@ class TestSlackStrategy:
 
 
 # ======================================================================= #
+# Verbose mode, comp_tol, misc API                                          #
+# ======================================================================= #
+
+class TestVerboseMode:
+    def test_prints_header(self, capsys):
+        pympcc.solve(SIMPLE.problem, strategy="scholtes", verbose=True, max_iter=2)
+        out = capsys.readouterr().out
+        assert "pympcc" in out
+        assert "iter" in out
+
+    def test_prints_kkt_col(self, capsys):
+        pympcc.solve(SIMPLE.problem, strategy="scholtes", verbose=True, max_iter=2)
+        out = capsys.readouterr().out
+        assert "kkt_res" in out
+
+    def test_verbose_shows_rows(self, capsys):
+        pympcc.solve(SIMPLE.problem, strategy="smoothing", verbose=True, max_iter=3)
+        lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+        # header + separator + 3 data rows
+        assert len(lines) >= 4
+
+    def test_verbose_suppressed_when_callback_provided(self, capsys):
+        calls = []
+        pympcc.solve(SIMPLE.problem, strategy="scholtes", max_iter=2,
+                     verbose=True,
+                     callback=lambda k, info: calls.append(k))
+        out = capsys.readouterr().out
+        # verbose=True is suppressed because callback was given
+        assert "iter" not in out
+        assert len(calls) == 2
+
+    def test_verbose_preamble_includes_strategy(self, capsys):
+        pympcc.solve(SIMPLE.problem, strategy="lin_fukushima", verbose=True, max_iter=1)
+        out = capsys.readouterr().out
+        assert "lin_fukushima" in out
+
+
+class TestCompTolIterative:
+    @pytest.mark.parametrize("strategy", ["scholtes", "smoothing", "lin_fukushima"])
+    def test_stops_before_max_iter(self, strategy):
+        result = pympcc.solve(SIMPLE.problem, strategy=strategy,
+                              comp_tol=1e-2, max_iter=100)
+        assert len(result.history) < 100
+
+    @pytest.mark.parametrize("strategy", ["scholtes", "smoothing", "lin_fukushima"])
+    def test_kkt_residual_is_float(self, strategy):
+        result = pympcc.solve(SIMPLE.problem, strategy=strategy, max_iter=3)
+        for info in result.history:
+            assert info.kkt_residual is None or isinstance(info.kkt_residual, float)
+
+
+class TestMiscBackend:
+    def test_unknown_backend_raises(self):
+        with pytest.raises(ValueError, match="Unknown backend"):
+            pympcc.solve(SIMPLE.problem, backend="bad_backend")
+
+    def test_filtersqp_import_error(self):
+        with pytest.raises(ImportError, match="pyfiltersqp"):
+            pympcc.solve(SIMPLE.problem, backend="filterSQP")
+
+    def test_comp_residual_helper(self):
+        s = pympcc.MPCCSolver(SIMPLE.problem, strategy="scholtes")._strategy
+        res = s._comp_residual(SIMPLE.problem.x0)
+        assert isinstance(res, float) and res >= 0.0
+
+    def test_manual_hessian_path(self):
+        """A user-supplied Lagrangian Hessian is passed to IPOPT."""
+        p = pympcc.MPCCProblem(
+            n=2, n_comp=1,
+            x0=np.array([0.5, 0.5]),
+            objective=lambda x: (x[0] - 2.0) ** 2 + (x[1] - 1.0) ** 2,
+            gradient=lambda x: np.array([2.0 * (x[0] - 2.0), 2.0 * (x[1] - 1.0)]),
+            comp_G=lambda x: np.array([x[0]]),
+            comp_G_jacobian=lambda x: np.array([[1.0, 0.0]]),
+            comp_H=lambda x: np.array([x[1]]),
+            comp_H_jacobian=lambda x: np.array([[0.0, 1.0]]),
+        )
+        # Inject a diagonal Lagrangian Hessian (identity scales)
+        rows = np.array([0, 1], dtype=np.intp)
+        cols = np.array([0, 1], dtype=np.intp)
+        p.lagrangian_hessian = lambda x, lam, obj_factor: obj_factor * np.array([2.0, 2.0])
+        p.lagrangian_hessian_sparsity = (rows, cols)
+        result = pympcc.solve(p, strategy="scholtes")
+        assert result.success
+        assert abs(result.obj - 1.0) < 1e-2
+
+
+class TestSparseWithConstraints:
+    """Sparse Jacobians for ineq/eq constraints — covers _build_std_jac_flat
+    and _build_standard_constraints sparse paths."""
+
+    @staticmethod
+    def _make_problem_with_sparse_ineq():
+        """n=3, n_comp=1, one inequality g(x) = x[2] - 1 <= 0 with sparse jac."""
+        return pympcc.MPCCProblem(
+            n=3, n_comp=1,
+            x0=np.array([0.5, 0.5, 0.5]),
+            objective=lambda x: (x[0] - 2.0) ** 2 + (x[1] - 1.0) ** 2,
+            gradient=lambda x: np.array([2.0 * (x[0] - 2.0), 2.0 * (x[1] - 1.0), 0.0]),
+            comp_G=lambda x: np.array([x[0]]),
+            comp_G_jacobian=lambda x: np.array([[1.0, 0.0, 0.0]]),
+            comp_H=lambda x: np.array([x[1]]),
+            comp_H_jacobian=lambda x: np.array([[0.0, 1.0, 0.0]]),
+            n_ineq=1,
+            ineq_constraints=lambda x: np.array([x[2] - 1.0]),
+            ineq_jacobian=lambda x: np.array([1.0]),          # sparse: 1 nnz
+            ineq_jacobian_sparsity=(np.array([0]), np.array([2])),
+        )
+
+    @staticmethod
+    def _make_problem_with_sparse_eq():
+        """n=3, n_comp=1, one equality h(x) = x[2] - 0.5 = 0 with sparse jac."""
+        return pympcc.MPCCProblem(
+            n=3, n_comp=1,
+            x0=np.array([0.5, 0.5, 0.5]),
+            objective=lambda x: (x[0] - 2.0) ** 2 + (x[1] - 1.0) ** 2,
+            gradient=lambda x: np.array([2.0 * (x[0] - 2.0), 2.0 * (x[1] - 1.0), 0.0]),
+            comp_G=lambda x: np.array([x[0]]),
+            comp_G_jacobian=lambda x: np.array([[1.0, 0.0, 0.0]]),
+            comp_H=lambda x: np.array([x[1]]),
+            comp_H_jacobian=lambda x: np.array([[0.0, 1.0, 0.0]]),
+            n_eq=1,
+            eq_constraints=lambda x: np.array([x[2] - 0.5]),
+            eq_jacobian=lambda x: np.array([1.0]),
+            eq_jacobian_sparsity=(np.array([0]), np.array([2])),
+        )
+
+    @pytest.mark.parametrize("strategy", ["scholtes", "smoothing", "lin_fukushima"])
+    def test_sparse_ineq_jacobian_converges(self, strategy):
+        p = self._make_problem_with_sparse_ineq()
+        result = pympcc.solve(p, strategy=strategy)
+        assert result.success
+
+    @pytest.mark.parametrize("strategy", ["scholtes", "smoothing", "augmented_lagrangian"])
+    def test_sparse_eq_jacobian_converges(self, strategy):
+        p = self._make_problem_with_sparse_eq()
+        result = pympcc.solve(p, strategy=strategy)
+        assert result.success
+
+    def test_stationarity_sparse_jac(self):
+        """KKT residual with sparse ineq Jacobian."""
+        p = self._make_problem_with_sparse_ineq()
+        result = pympcc.solve(p, strategy="scholtes")
+        assert result.stationarity in {
+            "S-stationary", "M-stationary", "C-stationary",
+            "W-stationary", "unknown", "not stationary",
+        }
+
+
+# ======================================================================= #
 # scipy backend                                                             #
 # ======================================================================= #
 
-pytest.importorskip("scipy", reason="scipy not installed")
-
-
+@_skip_no_scipy
 class TestScipyBackend:
     """Tests for backend='scipy' (trust-constr) across strategies."""
 
@@ -632,10 +788,6 @@ class TestScipyBackend:
         result = pympcc.solve(SIMPLE.problem, strategy="direct", backend="scipy")
         assert result.history == []   # direct has no outer history
         assert result.n_ipopt_iter if hasattr(result, "n_ipopt_iter") else True
-
-    def test_invalid_backend_raises(self):
-        with pytest.raises(ValueError, match="Unknown backend"):
-            pympcc.solve(SIMPLE.problem, backend="bad_backend")
 
     def test_sparse_problem(self):
         result = pympcc.solve(SIMPLE_SPARSE, strategy="scholtes", backend="scipy")

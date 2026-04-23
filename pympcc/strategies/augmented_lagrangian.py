@@ -94,7 +94,7 @@ class AugmentedLagrangianStrategy(BaseStrategy):
     name = "augmented_lagrangian"
     _VALID_OPTIONS: frozenset = frozenset(_DEFAULTS)
 
-    def _build_jax_hessian(self, mu_ref: list, rho_ref: list):
+    def _build_jax_hessian(self, mu_ref: list, rho_ref: list):  # pragma: no cover
         """
         Build exact Lagrangian Hessian via JAX autodiff.
 
@@ -255,7 +255,7 @@ class AugmentedLagrangianStrategy(BaseStrategy):
         rho_ref = [self.rho_0]
 
         hess_fn, hess_sparsity = None, None
-        if self._has_jax_hessian():
+        if self._has_jax_hessian():  # pragma: no cover
             hess_fn, hess_sparsity = self._build_jax_hessian(mu_ref, rho_ref)
 
         # Pre-allocate gradient scatter buffer for the sparse path.

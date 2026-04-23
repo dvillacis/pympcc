@@ -169,7 +169,7 @@ if HAS_NUMBA:   # pragma: no cover
             out[rows[k], cols[k]] = values[k]
 
 else:
-    def eval_weighted_union(    # type: ignore[misc]
+    def eval_weighted_union(
         v_G: np.ndarray,
         v_H: np.ndarray,
         alpha: np.ndarray,
@@ -187,7 +187,7 @@ else:
         if m2.any():
             out[m2] += beta[r_u[m2]] * v_H[map2[m2]]
 
-    def weighted_row_sum(       # type: ignore[misc]
+    def weighted_row_sum(
         alpha: np.ndarray,
         A: np.ndarray,
         beta: np.ndarray,
@@ -198,14 +198,14 @@ else:
         np.multiply(A, alpha[:, None], out=out)
         out += B * beta[:, None]
 
-    def scatter_add(            # type: ignore[misc]
+    def scatter_add(
         out: np.ndarray,
         indices: np.ndarray,
         values: np.ndarray,
     ) -> None:
         np.add.at(out, indices, values)
 
-    def eval_phi_eps_weighted_union(    # type: ignore[misc]
+    def eval_phi_eps_weighted_union(
         v_G: np.ndarray,
         v_H: np.ndarray,
         G: np.ndarray,
@@ -229,7 +229,7 @@ else:
         if m2.any():
             out[m2] += beta[m2] * v_H[map2[m2]]
 
-    def coo_to_dense(                   # type: ignore[misc]
+    def coo_to_dense(
         rows: np.ndarray,
         cols: np.ndarray,
         values: np.ndarray,

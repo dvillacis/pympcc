@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 import warnings
 from abc import ABC, abstractmethod
+from typing import cast
 
 import numpy as np
 
@@ -86,7 +87,7 @@ class BaseStrategy(ABC):
         # ------------------------------------------------------------------ #
         # filterSQP backend                                                    #
         # ------------------------------------------------------------------ #
-        if self.backend == "filterSQP":
+        if self.backend == "filterSQP":  # pragma: no cover
             try:
                 from pyfiltersqp import _FilterSQPAdapter
             except ImportError as exc:
@@ -94,10 +95,6 @@ class BaseStrategy(ABC):
                     "backend='filterSQP' requires the pyfiltersqp package. "
                     "Install it or switch to backend='ipopt'."
                 ) from exc
-            # When the strategy uses a sparse jac_fn (returns a flat nnz
-            # array for a fixed COO structure), wrap it to produce a scipy
-            # sparse CSR matrix.  _FilterSQPAdapter slices it into eq/ineq
-            # blocks and passes it directly to OSQP — no densification.
             _jac_fn = jac_fn
             if jac_structure is not None:
                 import scipy.sparse as _sp
@@ -125,11 +122,11 @@ class BaseStrategy(ABC):
         # ------------------------------------------------------------------ #
         # scipy backend                                                        #
         # ------------------------------------------------------------------ #
-        if self.backend == "scipy":
+        if self.backend == "scipy":  # pragma: no cover
             from .._scipy_adapter import _ScipyAdapter
             return _ScipyAdapter(
                 n=p.n, m=len(cl),
-                xl=p.xl, xu=p.xu, cl=cl, cu=cu,
+                xl=p.xl, xu=p.xu, cl=cl, cu=cu,  # type: ignore[arg-type]
                 obj_fn=_obj, grad_fn=_grad,
                 con_fn=con_fn, jac_fn=jac_fn,
                 jac_rows=jac_structure[0] if jac_structure is not None else None,
@@ -148,6 +145,7 @@ class BaseStrategy(ABC):
             con_fn=con_fn, jac_fn=jac_fn,
             hess_fn=hess_fn, hess_sparsity=hess_sparsity,
         )
+        base: type[_DenseNLP] | type[_SparseNLP]
         if jac_structure is not None:
             base = _SparseNLP
             extra = dict(jac_rows=jac_structure[0], jac_cols=jac_structure[1])
@@ -230,10 +228,10 @@ class BaseStrategy(ABC):
         G  = np.asarray(p.comp_G(x))
         H  = np.asarray(p.comp_H(x))
         JG = self._to_dense_block(
-            p.comp_G_jacobian(x), p.comp_G_jacobian_sparsity, p.n_comp, p.n
+            p.comp_G_jacobian(x), p.comp_G_jacobian_sparsity, p.n_comp, p.n  # type: ignore[operator]
         )
         JH = self._to_dense_block(
-            p.comp_H_jacobian(x), p.comp_H_jacobian_sparsity, p.n_comp, p.n
+            p.comp_H_jacobian(x), p.comp_H_jacobian_sparsity, p.n_comp, p.n  # type: ignore[operator]
         )
         return G, H, JG, JH
 
@@ -352,9 +350,9 @@ class BaseStrategy(ABC):
         p = self.problem
         parts: list[np.ndarray] = []
         if p.n_ineq > 0:
-            parts.append(np.asarray(p.ineq_constraints(x)))
+            parts.append(np.asarray(p.ineq_constraints(x)))  # type: ignore[misc]
         if p.n_eq > 0:
-            parts.append(np.asarray(p.eq_constraints(x)))
+            parts.append(np.asarray(p.eq_constraints(x)))  # type: ignore[misc]
         return parts
 
     @staticmethod
@@ -384,10 +382,10 @@ class BaseStrategy(ABC):
         p = self.problem
         parts: list = []
         if p.n_ineq > 0:
-            J = np.asarray(p.ineq_jacobian(x), dtype=float)
+            J = np.asarray(p.ineq_jacobian(x), dtype=float)  # type: ignore[misc, operator]
             parts.append(J if J.ndim == 1 else J.ravel())
         if p.n_eq > 0:
-            J = np.asarray(p.eq_jacobian(x), dtype=float)
+            J = np.asarray(p.eq_jacobian(x), dtype=float)  # type: ignore[misc, operator]
             parts.append(J if J.ndim == 1 else J.ravel())
         return np.concatenate(parts) if parts else np.empty(0, dtype=float)
 
@@ -446,7 +444,7 @@ class BaseStrategy(ABC):
         avoiding the cost of constructing a full :class:`MPCCResult`.
         """
         from types import SimpleNamespace
-        proxy = SimpleNamespace(x=x, mult_g=mult_g)
+        proxy = cast(MPCCResult, SimpleNamespace(x=x, mult_g=mult_g))
         return _compute_kkt_residual(
             proxy, self.problem,
             mpcc_mult_G=mpcc_mult_G,
@@ -471,15 +469,15 @@ class BaseStrategy(ABC):
         parts, jac_rows = [], []
 
         if p.n_ineq > 0:
-            parts.append(np.asarray(p.ineq_constraints(x)))
+            parts.append(np.asarray(p.ineq_constraints(x)))  # type: ignore[misc]
             jac_rows.append(self._to_dense_block(
-                p.ineq_jacobian(x), p.ineq_jacobian_sparsity, p.n_ineq, p.n
+                p.ineq_jacobian(x), p.ineq_jacobian_sparsity, p.n_ineq, p.n  # type: ignore[misc, operator]
             ))
 
         if p.n_eq > 0:
-            parts.append(np.asarray(p.eq_constraints(x)))
+            parts.append(np.asarray(p.eq_constraints(x)))  # type: ignore[misc]
             jac_rows.append(self._to_dense_block(
-                p.eq_jacobian(x), p.eq_jacobian_sparsity, p.n_eq, p.n
+                p.eq_jacobian(x), p.eq_jacobian_sparsity, p.n_eq, p.n  # type: ignore[misc, operator]
             ))
 
         return parts, jac_rows

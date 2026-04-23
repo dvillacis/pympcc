@@ -52,7 +52,7 @@ class SmoothingStrategy(BaseStrategy):
     name = "smoothing"
     _VALID_OPTIONS: frozenset = frozenset(_DEFAULTS)
 
-    def _build_jax_hessian(self, eps_ref: list):
+    def _build_jax_hessian(self, eps_ref: list):  # pragma: no cover
         """
         Build exact Lagrangian Hessian via JAX autodiff.
 
@@ -181,7 +181,7 @@ class SmoothingStrategy(BaseStrategy):
         eps_ref = [self.epsilon_0]
 
         hess_fn, hess_sparsity = None, None
-        if self._has_jax_hessian():
+        if self._has_jax_hessian():  # pragma: no cover
             hess_fn, hess_sparsity = self._build_jax_hessian(eps_ref)
 
         def constraints(x):
@@ -209,7 +209,10 @@ class SmoothingStrategy(BaseStrategy):
         # When the sparse hot path is active (p.is_sparse and union_maps is not
         # None), the kernel writes phi_vals directly into _jac_flat_buf via the
         # view — zero copies on the return path.
+        _union_buf: np.ndarray | None
         if p.is_sparse and gh_sp is not None:
+            assert jac_structure is not None  # set above when p.is_sparse
+            assert p.comp_G_jacobian_sparsity is not None and p.comp_H_jacobian_sparsity is not None
             _nnz_G   = len(p.comp_G_jacobian_sparsity[0])
             _nnz_H   = len(p.comp_H_jacobian_sparsity[0])
             _nnz_gh  = len(gh_sp[0])

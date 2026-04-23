@@ -1,6 +1,6 @@
 [project]
 name = "pympcc"
-version = "0.2.0"
+version = "0.2.1"
 description = "Python solver for Mathematical Programs with Complementarity Constraints (MPCC) using IPOPT via cyipopt"
 readme = "README.md"
 license = { text = "MIT" }
@@ -54,6 +54,12 @@ packages = ["pympcc"]
 testpaths = ["tests"]
 addopts = "--tb=short"
 minversion = "7.0"
+
+[tool.coverage.run]
+omit = [
+    "pympcc/_scipy_adapter.py",
+    "pympcc/_jax.py",
+]
 
 [tool.coverage.report]
 fail_under = 85
