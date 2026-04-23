@@ -17,3 +17,5 @@ wheels/
 .venv/
 
 CLAUDE.md
+
+.ruff_cache/

@@ -1,5 +1,9 @@
 # pympcc
 
+[![PyPI](https://img.shields.io/pypi/v/pympcc)](https://pypi.org/project/pympcc/)
+[![CI](https://github.com/davidvillacis/pympcc/actions/workflows/tests.yml/badge.svg)](https://github.com/davidvillacis/pympcc/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A Python package for solving **Mathematical Programs with Complementarity Constraints (MPCC)** using [IPOPT](https://github.com/coin-or/Ipopt) via [cyipopt](https://github.com/mechmotum/cyipopt).
 
 ## Problem form
