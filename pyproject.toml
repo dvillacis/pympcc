@@ -41,11 +41,7 @@ dev = [
 ]
 numba = ["numba>=0.57"]
 jax = ["jax>=0.4"]
-filterSQP = ["pyfiltersqp", "osqp>=1.0"]
 scipy = ["scipy>=1.10"]
-
-[tool.uv.sources]
-pyfiltersqp = { path = "../pyfiltersqp", editable = true }
 
 [build-system]
 requires = ["hatchling"]
