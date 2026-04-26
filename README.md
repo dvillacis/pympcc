@@ -4,7 +4,7 @@
 [![CI](https://github.com/davidvillacis/pympcc/actions/workflows/tests.yml/badge.svg)](https://github.com/davidvillacis/pympcc/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A Python package for solving **Mathematical Programs with Complementarity Constraints (MPCC)** using [IPOPT](https://github.com/coin-or/Ipopt) via [cyipopt](https://github.com/mechmotum/cyipopt).
+A Python package for solving **Mathematical Programs with Complementarity Constraints (MPCC)** using [IPOPT](https://github.com/coin-or/Ipopt) via [cyipopt](https://github.com/mechmotum/cyipopt), with an optional SciPy backend for small IPOPT-free runs.
 
 ## Problem form
 
@@ -21,7 +21,7 @@ s.t. g(x) ≤ 0              (inequality constraints)
 
 ## Installation
 
-**Requirements:** Python ≥ 3.11, a working IPOPT installation, and `cyipopt`.
+**Requirements:** Python ≥ 3.11. The default IPOPT backend also requires a working IPOPT installation and `cyipopt`.
 
 ```bash
 # macOS (Homebrew)
@@ -30,14 +30,29 @@ brew install ipopt
 # Linux (Debian/Ubuntu)
 sudo apt-get install coinor-libipopt-dev
 
-# Install the package
-pip install pympcc
+# Install the package with the default IPOPT backend
+pip install "pympcc[ipopt]"
 
-# With development dependencies (pytest, coverage)
+# Minimal install for the SciPy backend only
+pip install "pympcc[scipy]"
+
+# With development dependencies (pytest, coverage, IPOPT backend)
 pip install "pympcc[dev]"
 
 # Optional: Numba JIT kernels for large sparse problems (~2–5× speedup on hot paths)
 pip install "pympcc[numba]"
+```
+
+The custom IPOPT linear-solver bridge is optional and only needed when passing
+`linear_solver_fn`. Build it in-place after installing IPOPT and the development
+dependencies:
+
+```bash
+uv run python setup.py build_ext --inplace
+
+# Optional overrides when IPOPT is not in a standard prefix:
+IPOPT_INCLUDE_DIR=/path/to/include/coin-or IPOPT_LIB_DIR=/path/to/lib \
+  uv run python setup.py build_ext --inplace
 ```
 
 ---

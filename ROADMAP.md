@@ -1,358 +1,362 @@
 # pympcc Roadmap
 
-This document describes what is already implemented, what is planned, and why each item matters for the MPCC research community.  Items are grouped by effort and impact rather than by strict version number, because priorities shift as user feedback arrives.
+This roadmap tracks parity with commercial MPCC solvers (KNITRO MPEC,
+GAMS-NLPEC, FilterMPEC, BARON-MPCC) across presolve, diagnostics,
+solution methods, and modeling UX.
+
+Items are tagged ✅ *shipped*, *in progress*, or *planned*.  Scope
+estimates: **S** (≲200 lines + tests), **M** (~500–1500), **L** (multi-week).
 
 ---
 
-## Current state (v0.1)
+## 1. Presolve & problem reduction
 
-| Feature | Status |
-|---|---|
-| `MPCCProblem` — numeric interface with dense Jacobians | ✅ |
-| `StructuredMPCC` — explicit linear + nonlinear constraint layers | ✅ |
-| Direct NLP strategy | ✅ |
-| Scholtes relaxation (sequential, warm-started) | ✅ |
-| Fischer-Burmeister smoothing (sequential, warm-started) | ✅ |
-| Lin-Fukushima regularization (sequential, warm-started) | ✅ |
-| Augmented Lagrangian strategy (PHR method, penalty in objective) | ✅ |
-| MacMPEC benchmark suite (8 problems, 3 checks × 4 strategies) | ✅ |
-| `MPCCResult` with per-iteration history | ✅ |
-| Finite-difference Jacobian fallback (`"fd"` sentinel) | ✅ |
-| Stationarity classification (`result.stationarity`, `classify_stationarity`) | ✅ ⚠️ |
-| Dual warm-starting between outer iterations (`dual_warmstart=True`) | ✅ |
-| Sparse Jacobian support (COO format via `*_jacobian_sparsity` fields) | ✅ |
-| Slack (lifting) strategy — zero x-block in complementarity rows | ✅ |
+Goal: every downstream strategy sees a maximally-reduced problem.  All
+passes ship behind the opt-in flag `MPCCSolver(..., presolve=True)`
+(equivalently `pympcc.solve(..., presolve=True)`).  When nothing can
+be eliminated, every pass is a no-op and returns an identity
+`PresolveMap`.
 
-⚠️ = implemented and correct, but see known limitation under item 2.
+### Tier A — generic NLP presolve
 
----
+#### A1. Pinned-variable elimination ✅ *(shipped)*
 
-## Near-term
+Detect `xl[j] == xu[j]` (finite, equal); substitute the variable out of
+the optimisation, wrap callbacks to reinject the fixed value before
+evaluation.  Reduces `n`, every Jacobian sparsity column index, and the
+result is auto-expanded back to the original `n` on return.
 
-These items have the highest impact-to-effort ratio and directly lower the barrier to adoption.
+Module: `pympcc/_presolve.py` — `PresolveMap`, `presolve()`.
 
-### 1. Slack (lifting) strategy ✅
+#### A2. Linear FBBT (Feasibility-Based Bound Tightening) ✅ *(shipped)*
 
-**Why it matters:** In every non-lifted strategy, the complementarity rows `∂(G_i·H_i)/∂x`
-have `n` entries each.  For large-n problems (imaging, contact mechanics, traffic networks
-with `n ≫ n_comp`) this makes the Jacobian dominated by the complementarity block.
+Linearity is detected per-row by comparing `g(x0+δ) − g(x0)` against
+`J(x0)·δ` on a single bounded perturbation; rows passing the test
+contribute to a fixed-point bound-tightening sweep up to
+`_FBBT_BUDGET = 50` iterations.  Detected infeasibility (a tightening
+that crosses a bound, or a constant violation on an empty row) emits a
+`UserWarning` and falls back to identity so the strategy can surface
+the issue through its normal infeasibility path.
 
-The slack strategy introduces explicit slack variables `s_G = G(x)` and `s_H = H(x)` and
-rewrites the complementarity condition as `s_G · s_H ≤ ε` on the slacks alone.  The
-Jacobian rows for the complementarity block have **zero entries in x** and only
-`2 × n_comp` nonzeros total, independent of `n`:
+Composes with A1: variables that FBBT collapses to `xl[j] == xu[j]` are
+picked up by the pinned-var pass on the same presolve call (FBBT runs
+first).  Equality rows whose only column is then pinned are dropped via
+`drop_empty_rows=True` in `reduce_jac`, with `surviving_orig_rows`
+tracked on the `PresolveMap` so multipliers are zero-padded at the
+pruned indices on `expand_result`.
 
-```
-    x (n)          s_G (n_comp)    s_H (n_comp)
-[  JG           |      −I         |       0      ]   ← G − s_G
-[  JH           |       0         |      −I      ]   ← H − s_H
-[   0           |  diag(s_H)      |  diag(s_G)   ]   ← s_G · s_H
-```
+Module: `pympcc/_presolve.py` — `_identify_linear_rows`, `_fbbt`.
+Tests: `tests/test_fbbt.py` (11 cases).
 
-**Implemented:**
-- `SlackStrategy` in `pympcc/strategies/slack.py`
-- Always uses sparse NLP adapter; sparsity structure built once before the outer loop
-- Outer loop structure identical to Scholtes (`ε → 0`, warm-started between iterations)
-- Exposed as `strategy="slack"`; full `dual_warmstart`, `epsilon_0`, `reduction`,
-  `epsilon_min`, `max_iter` option support
-- `result.stationarity`: `"S-stationary"` (no biactive pairs) or `"unknown"` (biactive
-  pairs present — lifted multiplier signs are not constrained)
+#### A3. Singleton equality substitution — *subsumed*
 
-**Impact for imaging applications (n=10,000, n_comp=50):**
+Equivalent to FBBT collapsing `xl[j] = xu[j]` on a single-column
+equality.  Verified by `tests/test_fbbt.py::TestComposition`.  No
+dedicated pass needed unless we hit a counter-example in the wild.
 
-| Strategy | comp-row nnz | total Jacobian entries |
-|----------|-------------|------------------------|
-| Scholtes | 10,000 / row | 50 × 10,000 = 500,000 |
-| Slack    | 2 / row      | 50 × 2 = 100 (+pinning)|
+#### A4. Empty-row / empty-column removal ✅ *(shipped)*
 
----
+Two complementary passes:
 
-### 2. Finite-difference Jacobian fallback
+1. **Empty-row removal** (`_detect_empty_rows`): ineq/eq rows with
+   structurally empty Jacobian sparsity are evaluated once at `x0`;
+   feasible rows (`≤ tol` for ineq, `|·| ≤ tol` for eq) are dropped via
+   the same `keep_ineq`/`keep_eq` machinery FBBT introduced.  Violated
+   constants emit a `UserWarning` and fall back to identity.
+2. **Empty-column removal** (`_detect_empty_cols`): variables absent
+   from every Jacobian sparsity *and* with `|∇f|` below tolerance at
+   two random probe points are pinned to `clip(0, xl[j], xu[j])`.
+   A1 then eliminates them.
 
-**Why it matters:** Providing exact Jacobians by hand is the single largest friction point for new users.  A finite-difference (FD) fallback would let anyone prototype quickly and switch to exact derivatives only when performance demands it.
+Conservative: empty-col detection refuses to act when any present
+constraint exposes a dense Jacobian (no sparsity to inspect).
 
-**Plan:**
-- Forward-difference and central-difference modes, selectable per function (`gradient`, `eq_jacobian`, `comp_G_jacobian`, …)
-- Accept `"fd"` as the Jacobian argument: `comp_G_jacobian="fd"`
-- Scalar step size option with a sensible default (e.g. `h = sqrt(eps_machine)`)
-- Warn when FD is active so users do not leave it on by accident in production
+Module: `pympcc/_presolve.py` — `_detect_empty_rows`,
+`_detect_empty_cols`.  Tests: `tests/test_empty_rows_cols.py` (12).
 
-**Impact:** Dramatically reduces onboarding cost; makes `pympcc` accessible to practitioners who do not want to derive derivatives analytically.
+#### A5. Forcing-constraint detection — *partially subsumed*
 
----
+If `Σ aᵢⱼ xⱼ ≤ b` saturates at `Σ aᵢⱼ uⱼ = b`, FBBT already pins every
+variable in the row to its bound (the `rest_min` term equals `−b` for
+each `j`).  Worth re-checking once a real combinatorial-MPCC test case
+exists; a dedicated detector might still beat FBBT on cost.
 
-### 2. Stationarity classification ✅ (implemented — known limitation)
+### Tier B — MPCC-specific presolve
 
-**Why it matters:** NLP solvers find stationary points of the reformulated NLP, but at an MPCC solution several distinct stationarity concepts exist — from weakest (W-stationary) to strongest (S-stationary) — and they carry very different optimality guarantees.  Reporting only `comp_residual` leaves users with no information about the quality of the solution they obtained.
+#### B1. Dead-pair pruning ✅ *(shipped)*
 
-**Stationarity hierarchy (weakest → strongest):**
+Comp pair `i` whose `comp_G_jacobian_sparsity` row is empty AND whose
+value at `x0` is strictly positive is trivially satisfied; drop the
+pair.  Symmetric for `comp_H`.  Restricted to the COO-sparsity case.
 
-```
-W-stationary  ⊂  C-stationary  ⊂  M-stationary  ⊂  S-stationary  ⊂  B-stationary
-```
+#### B2. Forced-pair pruning ✅ *(shipped)*
 
-**Implemented:**
-- `result.stationarity: str` populated post-solve by all three strategies
-- `pympcc.classify_stationarity(result, problem, tol)` as a standalone utility
-- Correct classification logic for all levels based on biactive set and multiplier signs
-- Edge cases: `"not stationary"` (failed solve), `"unknown"` (no multipliers available)
+Symmetric to B1 from the other side.  If `H_i` has a structurally
+empty Jacobian row *and* `|H_i(x0)| ≤ tol`, complementarity degenerates
+(`H_i = 0` already satisfied) and `G_i ≥ 0` is promoted to a regular
+inequality.  Symmetric for `G_i ≡ 0`.  Pairs with *both* rows constant
+zero are added to `extra_dead` and dropped entirely.
 
-**Known limitation — IPOPT sign convention:**
-IPOPT's interior-point method uses the Lagrangian `L = f + λᵀc`, so at an active
-lower bound `G_i = 0` the KKT multiplier satisfies `λ_G ≤ 0`, and the literature
-convention `μ_G = −λ_G ≥ 0` is **structurally guaranteed** for any well-converged
-solution.  As a result:
+Implementation augments `iJ_sp` / `ineq_constraints` / `ineq_jacobian`
+in `_build_reduced` with the promoted rows: sparsity rows are
+extracted from `comp_G_jacobian_sparsity` (resp. `comp_H_…`), pinned
+columns are dropped, values are negated (`G_i ≥ 0` ⇔ `−G_i ≤ 0`).
+Multipliers on promoted rows are dropped on `expand_result` (info
+loss; the original-space comp multipliers at the promoted indices are
+zero-padded).
 
-- Non-biactive solutions (G_i > tol or H_i > tol) → always vacuously S-stationary
-- Biactive solutions → always genuinely S-stationary (IPOPT's KKT forces `μ ≥ 0`)
+Restricted to the all-COO case (refuses if `ineq_jacobian_sparsity` is
+dense — would force mixing dense + sparse blocks).
 
-The W/C/M distinction is therefore not observable through IPOPT's `mult_g` for
-converged solutions.  The classification correctly reports `"not stationary"` for
-failed solves and `"unknown"` when multipliers are unavailable, which retains
-diagnostic value.
+Module: `pympcc/_presolve.py` — `_detect_forced`, augmentation block
+in `_build_reduced`.  Tests: `tests/test_forced_pair.py` (8).
 
-**Meaningful use cases:**
-- Confirming that a converged solution has the strongest possible stationarity quality
-- Detecting solver failures via the `"not stationary"` / `"unknown"` branches
-- Post-processing results from non-interior-point solvers (SNOPT, KNITRO, SQP
-  methods) that can produce multipliers of any sign — these would show true W/C/M
-  differentiation when pympcc gains alternative NLP backends (see item 13)
+#### B3. Pre-fixing on linear sign analysis ✅ *(shipped)*
 
-**Impact:** Infrastructure is in place and correct; full W/C/M/S differentiation
-requires either a non-interior-point backend or a reformulation that bypasses the
-sign constraint imposed by IPOPT's KKT conditions.
+For each comp pair not already dropped by B1/B2, run the FBBT linearity
+probe on `comp_G` and `comp_H`.  When a row passes, compute its
+interval over the FBBT-tightened box `[xl, xu]` via
+`_row_interval` (inf-safe).  If `G_min > _DEAD_VAL_TOL` then
+complementarity forces `H_i = 0`: pair index goes to `prefix_H_eq`,
+the pair is dropped, and the row of `comp_H_jacobian_sparsity` for
+that pair is appended to the eq block as a regular equality.
+Symmetric for `H_min > tol` → `prefix_G_eq` and `G_i = 0` appended.
+If *both* sides certify positive on the same pair the feasible set is
+empty: emit `UserWarning` and fall back to identity.
 
----
+Augmentation lives in `_build_reduced` mirroring B2's ineq path
+(values are *not* negated since we're producing equalities).
+Multipliers on the prefix-eq slot are dropped on `expand_result`
+(info loss; the comp multipliers at the dropped indices are
+zero-padded).
 
-### 3. Lin-Fukushima regularization strategy ✅
+Module: `pympcc/_presolve.py` — `_row_interval`, `_detect_prefix_eq`,
+B3 augmentation block in `_build_reduced`.
+Tests: `tests/test_prefix_eq.py` (11).
 
-**Why it matters:** Scholtes relaxation replaces `G·H ≤ ε` but does not improve the constraint qualification structure.  The Lin-Fukushima regularization (Lin & Fukushima, 2003) uses a tighter perturbation that guarantees MPCC-MFCQ holds at the regularized solution even when MPCC-LICQ fails, which translates to better practical convergence on degenerate problems.
+#### B4. Linear-comp-pair detection — *deferred*
 
-**Reformulation:**
+When both `G_i` and `H_i` are linear in `x`, that pair is an LCP-style
+row.  Detection lives in presolve; the strategy layer would route
+those rows to a specialised LP-based branch.  Deferred until the
+LP-branch consumer (§3.1) lands — shipping a detector with no consumer
+is dead code.
 
-```
-G_i(x) * H_i(x) ≤ ε,   G_i(x) + H_i(x) ≥ ε    (Lin-Fukushima)
-vs.
-G_i(x) * H_i(x) ≤ ε                              (Scholtes)
-```
+### Tier C — deferred presolve passes
 
-The extra lower bound on `G + H` prevents both variables from simultaneously approaching zero from below — the source of MFCQ failure in Scholtes.
-
-**Implemented:**
-- `LinFukushimaStrategy` in `pympcc/strategies/lin_fukushima.py`
-- Constraint layout `[g, h, G, H, G·H, G+H]` — one extra row per complementarity pair vs. Scholtes
-- Same outer loop structure (sequential warm-started solves, `epsilon_min` stopping criterion)
-- Exposed as `strategy="lin_fukushima"`; included in MacMPEC benchmark suite
-
-**Impact:** More robust on problems where Scholtes stalls; differentiates `pympcc` from packages that only implement the basic relaxation.
-
----
-
-### 4. Dual warm-starting between outer iterations ✅
-
-**Why it matters:** The iterative strategies (Scholtes, smoothing, Lin-Fukushima) previously warm-started only the primal variable `x`.  Providing the dual variables (multipliers) from the previous solve as the starting point for the next often cuts the inner IPOPT iteration count by 30–60% on smooth sequences.
-
-**Implemented:**
-- `dual_warmstart=True` (default) in all three iterative strategies
-- First outer iteration always cold-starts; from iteration 2 onwards `mult_g`, `mult_x_L`, `mult_x_U` are passed to `nlp.solve()` with `warm_start_init_point = "yes"`
-- Disable with `dual_warmstart=False` — produces identical solutions, useful for benchmarking
+* C1. Duplicate-row / parallel-column detection — useful in MILP, marginal in MPCC.
+* C2. Implied free variable substitution — fragile without symbolic Jacobians.
+* C3. Redundant-row / IIS extraction — see §2.4 (diagnostics).
+* C4. Coefficient strengthening — primarily a MILP technique.
+* C5. Dual fixing — requires reduced-cost information from a previous solve.
 
 ---
 
-### 5. Expand the MacMPEC benchmark suite
+## 2. Diagnostics & stationarity certificates
 
-**Why it matters:** The current 8-problem suite covers common structures but misses important categories: nonlinear KKT bilevel, Nash equilibrium (gnash), design-centering, and the larger ex9 family from Luo-Pang-Ralph (1996).
+pympcc currently classifies S/M/C-stationarity in `_stationarity.py`
+but does not certify constraint qualifications, second-order
+conditions, B-stationarity, or extract infeasibility certificates.
 
-**Plan:**
-- Add the following problems with verified optimal values:
-  - `ex9.1.1` – `ex9.1.10` (LP/QP inner problems, closed-form optima)
-  - `gnash1` (Nash equilibrium, n=18 variables)
-  - `dempe` (nonlinear equality from bilevel theory)
-  - `outrata32` – `outrata34` (parametric family)
-  - `desilva` (design-centering application)
-- Automate optimal-value verification by cross-checking scholtes vs. smoothing
+### 2.1. Constraint-qualification check (MPCC-LICQ / MPCC-MFCQ) ✅ *(shipped)*
 
----
+At a candidate point `x*` with active sets
+`I_g(x*) = {j : g_j = 0}`, `I_G = {i : G_i = 0}`, `I_H = {i : H_i = 0}`,
+`I_GH = I_G ∩ I_H` (biactive set):
 
-## Medium-term
+* **MPCC-LICQ**: gradients of all active `g_j`, all `h_k`, all
+  `∇G_i (i ∈ I_G)`, `∇H_i (i ∈ I_H)`, and all active variable-bound
+  rows are linearly independent.  Test by computing the rank of the
+  stacked active-gradient matrix (numpy SVD / `matrix_rank`).
+* **MPCC-MFCQ**: equality-style block (h, G_{I_G}, H_{I_H}) linearly
+  independent, plus a Mangasarian–Fromovitz direction `d` satisfying
+  `∇h·d = 0`, `∇G_i·d = 0 (i ∈ I_G)`, `∇H_i·d = 0 (i ∈ I_H)`,
+  `∇g_j·d < 0 (j ∈ I_g)`, and bound-compatible signs at active xL/xU.
+  Solve as a single LP: maximise `t` s.t. `∇g_j·d + t ≤ 0`, etc.
+  MPCC-MFCQ holds iff `t > 0` is achievable.
 
-These items require more design work but are important for scaling to real research problems.
+Surfaces as `result.cq` ∈ {`"MPCC-LICQ"`, `"MPCC-MFCQ"`, `"none"`,
+`"unknown"`} plus `result.cq_active_set_sizes` (dict) and
+`result.cq_rank_deficit` (int — slack from full rank).
+Active-set partition exposed via `pympcc.active_sets(result, problem)`.
 
-### 6. Sparse Jacobian support ✅
+Hook: `MPCCSolver.solve()` runs the diagnostics block (CQ + B-stat)
+after `expand_result`, behind opt-in `diagnostics=True`.  Default is
+off so the no-overhead fast path is preserved.
 
-**Why it matters:** Dense Jacobians of shape `(m, n)` are stored and sent to IPOPT even when 90% of entries are zero.  For problems with `n > 200` or `m > 100` (e.g. contact mechanics, traffic networks), this becomes the bottleneck.
+Module: `pympcc/_diagnostics.py` — `classify_cq`, `active_sets`.
+Tests: `tests/test_diagnostics.py` (11).
 
-**Implemented:**
-- Four optional `*_jacobian_sparsity` fields on `MPCCProblem` (COO format: `(row_indices, col_indices)`)
-- When a sparsity field is set, the corresponding `*_jacobian` callable returns a 1-D values array of `nnz` entries instead of a dense `(n_rows, n)` matrix
-- `MPCCProblem.is_sparse` property; `_SparseNLP` adapter in `_nlp.py` passes the structure to `jacobianstructure()`
-- All five strategies pre-compute the assembled global NLP sparsity structure once before the solve loop and dispatch to `_SparseNLP` automatically
-- Derived blocks (G·H, G+H, φ_ε) use the union of the G and H sparsity patterns
-- Union index maps (`map1`, `map2`) are precomputed once per solve; derived block values are assembled in O(nnz) from flat user-supplied values — no dense `(m, n)` matrix is ever allocated on hot-path Jacobian callbacks
-- Fully backward-compatible: dense path unchanged when no sparsity fields are set
+### 2.2. B-stationarity certification ✅ *(shipped)*
 
----
+`pympcc._stationarity.verify_b_stationarity` solves the LPCC
 
-### 7. Lagrangian Hessian support
+    min_d  ∇f(x*)·d
+    s.t.   linearised tangent cone of (g, h, G, H) at x*
 
-**Why it matters:** IPOPT defaults to a limited-memory BFGS Hessian approximation (`hessian_approximation=limited-memory`), which can be slow near MPCC solutions where the Lagrangian is non-smooth.  Providing the exact Hessian of the Lagrangian
+by enumerating `2^|I_00|` branches over the biactive set.  Each branch
+fixes a (G-active, H-≥0) or (H-active, G-≥0) assignment per biactive
+pair and solves a dense LP via `scipy.optimize.linprog`.  Returns a
+status dict with `n_biactive`, `n_branches_checked`, `min_descent`,
+`witness_branch`, `witness_d`.  Skips when `|I_00| > max_biactive`
+(default 10 → up to 1024 LPs).
 
-```
-W(x, σ, λ) = σ ∇²f + Σ λᵢ ∇²cᵢ
-```
+Wired into the §2.1 diagnostics block: when `diagnostics=True`,
+`MPCCSolver.solve()` populates `result.b_stationary`,
+`result.b_stationary_witness`, and `result.b_stationary_min_descent`.
 
-typically reduces outer IPOPT iterations by 2–5× on medium-scale problems.
+Bug fixed alongside §2.1: at points with `G_i > 0, H_i = 0` (resp.
+`G_i = 0, H_i > 0`), the linearised MPCC tangent cone enforces
+`∇H_i·d = 0` (resp. `∇G_i·d = 0`) since the strict-positive side
+forces the zero side to stay zero locally.  Previous code used the
+looser `≥ 0` form, which could falsely flag global optima as not
+B-stationary.
 
-**Plan:**
-- Optional `hessian` and `hessianstructure` callbacks on `MPCCProblem`
-- Each strategy assembles the Hessian of its full constraint vector (including the complementarity/relaxation terms) and delegates to the user-provided Hessians of `f`, `g`, `h`, `G`, `H`
-- Validate shapes at construction
+Module: `pympcc/_stationarity.py` — `verify_b_stationarity`.
+Tests: `tests/test_b_stationarity.py`, `tests/test_diagnostics.py`.
 
----
+### 2.3. Second-order condition (MPCC-SOSC) — (M)
 
-### 8. Augmented Lagrangian strategy ✅
+Checks the reduced Lagrangian Hessian is positive definite on the
+critical cone — verifies `x*` is a strict local minimiser, not a
+saddle.  Requires the Lagrangian Hessian (already exposed via
+`MPCCProblem.lagrangian_hessian` when supplied; else finite-difference
+fallback).
 
-**Why it matters:** Sequential quadratic programming (SQP) and augmented Lagrangian (AL) methods handle MPCC degeneracy differently from pure interior-point methods.  An AL outer loop with IPOPT as the inner solver can escape saddle points that IPOPT-direct cannot.
+Surface as `result.sosc` ∈ {`True`, `False`, `None`}.
 
-**Reformulation (PHR method for inequality `G_i · H_i ≤ 0`):**
+### 2.4. IIS / minimal infeasible subsystem — (L)
 
-```
-min  f(x) + (1/2ρ) Σ_i [max(0, μ_i + ρ G_i H_i)² − μ_i²]
-s.t. G(x) ≥ 0,  H(x) ≥ 0,  g(x) ≤ 0,  h(x) = 0
-```
+Replaces roadmap C3.  When a strategy returns infeasible, deletion-
+filter or Chinneck-style elimination identifies a minimal subset of
+constraints whose joint infeasibility certifies the original.  Useful
+for debugging large bilevel formulations where infeasibility is hard
+to localise.
 
-The complementarity condition lives entirely in the objective.  No G·H constraint appears — MFCQ holds trivially at every inner-NLP feasible point.
+### 2.5. Solver telemetry — (S)
 
-**Implemented:**
-- `AugmentedLagrangianStrategy` in `pympcc/strategies/augmented_lagrangian.py`
-- Constraint layout `[g, h, G, H]` — only 2 complementarity rows vs 3–4 in Scholtes/Lin-Fukushima
-- Outer loop: multiplier update `μ_i ← max(0, μ_i + ρ G_i H_i)`, penalty growth `ρ ← min(τρ, ρ_max)` when residual not decreasing by factor `η`
-- `result.history[k].epsilon` stores the current penalty `ρ` (not a relaxation parameter)
-- Early termination when `comp_residual < comp_tol`; all standard options (`dual_warmstart`, sparse Jacobians) supported
-- Exposed as `strategy="augmented_lagrangian"`; key parameters: `rho_0`, `rho_max`, `tau`, `eta`, `comp_tol`
-
----
-
-### 9. Multi-start for global search
-
-**Why it matters:** MPCC has exponentially many B-stationary points (one per active-set pattern).  Solvers reliably find *a* local solution; finding the *global* solution requires systematic exploration of starting points.
-
-**Plan:**
-- `pympcc.multistart(problem, n_starts, strategy, seed)` utility
-- Generates diverse starting points (Latin hypercube, random, grid) within `[xl, xu]`
-- Runs solves in parallel via `concurrent.futures.ProcessPoolExecutor`
-- Returns all converged results sorted by objective value
-- Flags the globally best result
-
----
-
-### 10. Automatic bilevel-to-MPCC reformulation
-
-**Why it matters:** Bilevel optimization is the largest application domain for MPCC.  Currently users must manually derive and code the lower-level KKT conditions, as in the `bard1` example.  This is error-prone and discourages non-experts.
-
-**Plan:**
-- `pympcc.bilevel.BilevelProblem` class accepting:
-  - Upper-level objective and constraints
-  - Lower-level objective, constraints, and variable partition
-- Auto-derives KKT conditions (stationarity, complementarity slackness) under convexity of the lower level
-- Validates that the lower-level satisfies LICQ at `x0` (necessary for valid KKT reformulation)
-- Converts to `StructuredMPCC` (linear stationarity → `A_eq`, nonlinear complementarity → `comp_G/H`)
+Per-iteration log of ε, complementarity residual, KKT residual,
+biactive-set size, CQ rank deficit.  Most pieces already on
+`IterationInfo`; needs a single `result.summary()` formatter.
 
 ---
 
-### 11. Pyomo interoperability
+## 3. Solution methods
 
-**Why it matters:** A large share of the optimization community already models problems in Pyomo.  Pyomo has an `mpec` extension that can represent complementarity conditions but relies on external transformations and solvers (PATH, IPOPT with manual NLP transformation).  A bridge from `pyomo.mpec` models to `pympcc` would give those users access to the dedicated strategies here.
+### 3.1. Branch-and-bound on disjunctions — (L)
 
-**Plan:**
-- `pympcc.from_pyomo(model)` that reads a `ConcreteModel` with `Complementarity` components
-- Extracts variables, objective, standard constraints, and complementarity pairs
-- Uses Pyomo's NL writer + numeric evaluation to generate the callbacks
-- Requires `pyomo` as an optional dependency
+For each pair branch `G_i = 0` ∨ `H_i = 0` and solve each leaf as a
+regular NLP.  Globalises the local NLP relaxation; finds non-S
+points the relax-and-drive methods miss.  Best-first or depth-first
+enumeration with bound pruning from the parent NLP.
 
----
+Consumer for B4 linear-pair detection: linear pairs route to an LP
+sub-solver instead of an NLP.
 
-## Long-term
+Module: new `pympcc/strategies/branch_and_bound.py`.
 
-These items define what v1.0 looks like as a mature, production-ready research package.
+### 3.2. Active-set SQP for MPCC — (L)
 
-### 12. Automatic differentiation backends
+Alternative to the relax-and-solve family: enumerate trial active sets
+on the comp pairs and solve the resulting equality-constrained QP at
+each iterate.  Following Fletcher–Leyffer FilterMPEC.  Faster on
+problems with a clear active set but more brittle near degeneracy.
 
-Eliminate the need for any handwritten derivatives by integrating with:
+### 3.3. Multi-start wrapper — (S)
 
-| Backend | Audience |
-|---|---|
-| **JAX** (`jax.grad`, `jax.jacfwd`) | ML researchers, optimal control |
-| **CasADi** | Control engineering, robotics |
-| **PyTorch** (`torch.autograd`) | Deep learning + optimization |
+Run any strategy from `K` randomly perturbed starts; return the best
+local optimum plus all encountered stationary points.  Cheap publishable
+addition; directly addresses single-start bias in the bilevel paper.
 
-**Plan:** A `pympcc.ad` submodule that wraps any differentiable function into the `(fn, jac_fn)` pair expected by `MPCCProblem`.
+Module: `pympcc/multistart.py`.  API: `pympcc.solve(problem, ...,
+n_starts=16, perturb_scale=0.1)`.
 
----
+### 3.4. Elastic-mode penalty — (M)
 
-### 13. Alternative NLP solver backends
+Anitescu / Leyffer ℓ₁-elastic penalty as a fallback when MFCQ collapses.
+Replaces hard equality `G·H = 0` by penalised slacks; complementary
+to Scholtes / smoothing when those stall on highly degenerate problems.
 
-IPOPT is the default and the most capable open-source option, but other solvers offer distinct advantages:
-
-| Solver | Advantage |
-|---|---|
-| **KNITRO** (via `knitropy`) | Faster on medium-scale; native MPCC mode |
-| **SNOPT** | Robust for highly nonlinear problems |
-| **OSQP** | Extremely fast for LP/QP subproblems in iterative strategies |
-| **Clarabel** | Conic solver for structured subproblems |
-
-**Plan:** Abstract the NLP solve interface behind a `Backend` protocol so strategies do not depend on cyipopt directly.
+Module: `pympcc/strategies/elastic.py`.
 
 ---
 
-### 14. Convergence diagnostics and plotting
+## 4. Modeling & user experience
 
-Researchers need to visualise and compare algorithm behaviour:
+### 4.1. Pyomo / mpec.complementarity bridge — (M)
 
-- `result.plot_history()` — convergence of objective and `comp_residual` vs outer iteration
-- `pympcc.benchmark(problems, strategies)` — table of solve times, iteration counts, final stationarity types, and failures across a problem set
-- Export results to pandas `DataFrame` for downstream analysis
+Today users hand-roll callables and COO sparsity.  A Pyomo backend
+would let users write
+`m.comp = Complementarity(expr=complements(m.x >= 0, m.y >= 0))` and
+have pympcc compile it down to `MPCCProblem`.  Eliminates most of the
+COO bookkeeping in `bilevel_mpcc_imaging/problem.py`.
 
----
+Module: `pympcc/frontend/pyomo.py`.
 
-### 15. Full API documentation (Sphinx + Read the Docs)
+### 4.2. Default JAX-AD path — (S)
 
-- Sphinx `autodoc` with `numpydoc` style
-- Mathematical background section (MPCC theory, strategy derivations)
-- Application-domain tutorials as Jupyter notebooks:
-  - Traffic equilibrium (Wardrop conditions)
-  - Bilevel parameter estimation
-  - Contact mechanics with Coulomb friction
-  - Nash equilibrium computation
+`_jax.py` exists but isn't the default.  Lift it so users can pass
+`objective` / `comp_G` / `comp_H` as JAX-traceable functions and have
+gradients, Jacobians, and sparsity patterns derived automatically.
 
----
+### 4.3. Auto pair-scaling — (S)
 
-## What will not be added
+`comp_G_scale` / `comp_H_scale` fields exist but no detector
+populates them.  Add a probe that evaluates `|G_i(x0)|, |H_i(x0)|`
+across a small batch of perturbations and rescales pairs whose
+typical magnitudes differ by > 1e3.
 
-To keep scope manageable, `pympcc` will not:
+Module: `pympcc/_autoscale.py`.
 
-- Implement a full NLP solver internally (cyipopt / alternative backends are always used for the inner problems)
-- Support mixed-integer complementarity (MICP) — a fundamentally different class
-- Provide a modelling language — problem definition stays purely numerical/callable-based; symbolic layers belong in CasADi / Pyomo / JuMP
+### 4.4. Result repr / summary formatter — (S)
 
----
-
-## Contributing
-
-Contributions are welcome at any priority tier.  The near-term items are the most tractable starting points for new contributors:
-
-1. Open an issue to discuss the approach before implementing
-2. Add tests to `tests/` before or alongside the implementation (test-driven is preferred)
-3. All new strategies must pass the MacMPEC benchmark suite at the same tolerances used by the existing strategies
+Single `result.summary(verbosity=...)` that prints obj, comp residual,
+CQ class, stationarity class, B-stat verdict, SOSC verdict, biactive
+set size.
 
 ---
 
-## References
+## 5. Bilevel / parametric extensions
 
-- Scholtes, S. (2001). *Convergence properties of a regularization scheme for MPCCs*. SIAM J. Optim.
-- Lin, G.-H., & Fukushima, M. (2003). *New relaxation method for MPEC*. J. Optim. Theory Appl.
-- Kadrani, A., Dussault, J.-P., & Benchakroun, A. (2009). *A new regularization scheme for MPECs*. SIAM J. Optim.
-- Kanzow, C., & Schwartz, A. (2013). *A new regularization method for MPCCs*. SIAM J. Optim.
-- Luo, Z.-Q., Pang, J.-S., & Ralph, D. (1996). *Mathematical Programs with Equilibrium Constraints*. Cambridge University Press.
-- Leyffer, S. (2006). *Solving MPCCs as NLPs*. Optim. Methods Softw.
-- Flegel, M. L., & Kanzow, C. (2005). *Abadie-type constraint qualification for MPECs*. Math. Program.
+### 5.1. Parametric sensitivity (sIPOPT-style) — (M)
+
+Compute `dx*/dp` for parameters `p` entering the MPCC.  Directly
+applicable to hyperparameter learning (the bilevel TV use case): the
+outer-loop gradient becomes a single linear solve at the inner-loop
+optimum instead of unrolled differentiation.
+
+Requires the KKT system at `x*` (already available from IPOPT) and
+implicit-function differentiation through the active set.
+
+Module: `pympcc/sensitivity.py`.  API: `pympcc.sensitivity(result,
+dp, ...)`.
+
+### 5.2. Multiplier warm-start — (S)
+
+Today the strategy layer warm-starts only the primal `x`.  Carrying
+`mult_g`, `mult_x_L`, `mult_x_U` between outer iterations can
+dramatically speed up ε-continuation and parametric sweeps.
+
+### 5.3. EPEC / VI extension — (L)
+
+Equilibrium problems with equilibrium constraints; out of scope for
+the SIAM imaging paper but a natural follow-up.
+
+---
+
+## Conventions
+
+* Every presolve pass is opt-in via `presolve=True`; default behaviour
+  is unchanged.
+* Every presolve pass returns `(reduced_problem, PresolveMap)`;
+  `is_identity` is `True` when nothing changed.
+* `PresolveMap.expand_result` is the single point that lifts solver
+  output back to the original variable / comp-pair indexing.
+* Reduction happens once at solver construction time, never inside an
+  outer iteration.
+* Reduction is COO-sparsity-aware; passes that need structural
+  information fall back to a no-op when the user supplied dense
+  Jacobians without sparsity patterns.
+* Diagnostics (§2) run after the strategy returns and never mutate
+  `result.x` or `result.mult_g`.  They populate side fields and emit
+  `UserWarning` only when they detect something genuinely wrong.

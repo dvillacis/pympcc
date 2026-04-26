@@ -6,7 +6,7 @@ from typing import Optional
 
 import numpy as np
 
-__all__ = ["IPOPTStatus", "IterationInfo", "MPCCResult"]
+__all__ = ["IPOPTStatus", "IterationInfo", "MPCCResult", "unscale_multipliers"]
 
 
 class IPOPTStatus(IntEnum):
@@ -44,6 +44,8 @@ class IterationInfo:
     n_ipopt_iter: int          # IPOPT iterations in this NLP solve
     iter_time: float           # wall-clock seconds for this NLP solve
     kkt_residual: Optional[float] = None  # MPCC stationarity residual (∞-norm)
+    restoration_iter_count: int = 0       # IPOPT iterations in feasibility restoration
+    entered_restoration: bool = False      # True if any iter ran in restoration mode
 
 
 @dataclass
@@ -101,6 +103,46 @@ class MPCCResult:
     mult_g: Optional[np.ndarray] = field(default=None)
     stationarity: str = "unknown"
     kkt_residual: Optional[float] = None
+    # Active-set cleanup phase (post-continuation polish solve).
+    # Populated only when the strategy was invoked with cleanup={True,"auto"}.
+    cleanup_status: Optional[int] = None          # IPOPT status of cleanup NLP
+    cleanup_n_iter: Optional[int] = None          # IPOPT iters in cleanup NLP
+    cleanup_obj: Optional[float] = None           # objective at cleanup solution
+    cleanup_active_set: Optional[tuple] = None    # (I_G_active, I_H_active)
+    cleanup_accepted: Optional[bool] = None       # True iff cleanup result replaces continuation
+    # Complementarity-pair diagonal scaling that was active during the solve.
+    # ``None`` when the problem was solved without rescaling.  Multipliers
+    # ``mpcc_mult_G`` / ``mpcc_mult_H`` returned via ``mult_g`` are in
+    # *scaled* space; multiply by these vectors to recover original-space
+    # KKT duals.  See :func:`pympcc.unscale_multipliers`.
+    comp_G_scale: Optional[np.ndarray] = None
+    comp_H_scale: Optional[np.ndarray] = None
+    # Constraint-qualification diagnostics (populated when the solver was
+    # invoked with ``diagnostics=True``).  See ``pympcc._diagnostics``.
+    cq: Optional[str] = None                       # "MPCC-LICQ" | "MPCC-MFCQ" | "none" | "unknown"
+    cq_active_set_sizes: Optional[dict] = None     # {"g","h","G","H","biactive","xL","xU"}
+    cq_rank_deficit: Optional[int] = None          # 0 ⇔ LICQ
+    # B-stationarity diagnostics (populated alongside ``cq``).  See
+    # ``pympcc._stationarity.verify_b_stationarity``.
+    b_stationary: Optional[str] = None             # "B-stationary" | "not B-stationary" | "intractable" | "unknown"
+    b_stationary_witness: Optional[tuple] = None   # branch chars where descent was found
+    b_stationary_min_descent: Optional[float] = None
+
+    def unscale_comp_multipliers(
+        self,
+        mpcc_mult_G: np.ndarray,
+        mpcc_mult_H: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Convert scaled-space comp multipliers back to original space.
+
+        If the problem was solved with ``comp_G_scale``/``comp_H_scale``
+        active, IPOPT's multipliers correspond to the *scaled* constraint
+        ``s · G(x) ≥ 0``.  Original-space duals satisfy ``μ = s · μ̃``
+        (chain rule).  Returns the input unchanged if no scaling was used.
+        """
+        s_G = self.comp_G_scale if self.comp_G_scale is not None else 1.0
+        s_H = self.comp_H_scale if self.comp_H_scale is not None else 1.0
+        return s_G * mpcc_mult_G, s_H * mpcc_mult_H
 
     def __repr__(self) -> str:  # pragma: no cover
         kkt_str = (f", kkt_residual={self.kkt_residual:.3e}"
@@ -111,3 +153,12 @@ class MPCCResult:
             f"comp_residual_mean={self.comp_residual_mean:.3e}, "
             f"stationarity={self.stationarity!r}{kkt_str}, status={self.status})"
         )
+
+
+def unscale_multipliers(
+    result: "MPCCResult",
+    mpcc_mult_G: np.ndarray,
+    mpcc_mult_H: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Module-level alias for :meth:`MPCCResult.unscale_comp_multipliers`."""
+    return result.unscale_comp_multipliers(mpcc_mult_G, mpcc_mult_H)

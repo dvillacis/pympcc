@@ -180,6 +180,16 @@ class MPCCProblem:
     eq_jacobian_sparsity:     Optional[tuple] = None
 
     # ------------------------------------------------------------------ #
+    # Optional per-pair diagonal rescaling for the complementarity block #
+    # ------------------------------------------------------------------ #
+    # When set, every strategy operates on (s_G * G, s_H * H) instead of #
+    # raw (G, H).  Multipliers returned by the solver are in scaled      #
+    # space; multiply by the corresponding scale to recover original     #
+    # KKT duals.  See pympcc.unscale_multipliers().                      #
+    comp_G_scale: Optional[np.ndarray] = None
+    comp_H_scale: Optional[np.ndarray] = None
+
+    # ------------------------------------------------------------------ #
 
     @property
     def is_sparse(self) -> bool:
@@ -188,6 +198,11 @@ class MPCCProblem:
             self.comp_G_jacobian_sparsity, self.comp_H_jacobian_sparsity,
             self.ineq_jacobian_sparsity, self.eq_jacobian_sparsity,
         ])
+
+    @property
+    def has_comp_scale(self) -> bool:
+        """True if either complementarity scale vector is set."""
+        return self.comp_G_scale is not None or self.comp_H_scale is not None
 
     def __post_init__(self) -> None:
         self.x0 = np.asarray(self.x0, dtype=float)
@@ -406,6 +421,11 @@ class MPCCProblem:
                 raise ValueError(
                     f"{_name}_sparsity: col indices out of range [0, {self.n})"
                 )
+            _keys = _rows.astype(np.intp, copy=False) * self.n + _cols.astype(np.intp, copy=False)
+            if np.unique(_keys).size != _keys.size:
+                raise ValueError(
+                    f"{_name}_sparsity: duplicate (row, col) entries are not allowed"
+                )
             _vals = np.asarray(_fn(x0))  # type: ignore[operator]
             if _vals.shape != (len(_rows),):
                 raise ValueError(
@@ -416,6 +436,21 @@ class MPCCProblem:
                 raise ValueError(
                     f"{_name}(x0) returned non-finite sparse values (NaN or Inf)"
                 )
+
+        for _name in ("comp_G_scale", "comp_H_scale"):
+            _scale = getattr(self, _name)
+            if _scale is None:
+                continue
+            _arr = np.asarray(_scale, dtype=float)
+            if _arr.shape != (self.n_comp,):
+                raise ValueError(
+                    f"{_name} must have shape ({self.n_comp},), got {_arr.shape}"
+                )
+            if not np.all(np.isfinite(_arr)):
+                raise ValueError(f"{_name} contains non-finite values")
+            if not np.all(_arr > 0.0):
+                raise ValueError(f"{_name} must be strictly positive")
+            setattr(self, _name, _arr)
 
     @staticmethod
     def _check_shape(name: str, fn: Callable, x0: np.ndarray,

@@ -37,8 +37,8 @@ class _ScipyAdapter:
     jac_fn : callable
         ``J(x) -> ndarray, shape (m, n)`` (dense) or flat 1-D nnz array (sparse).
     jac_rows, jac_cols : ndarray of int, optional
-        COO row/column indices for a sparse *jac_fn*.  When provided the
-        adapter densifies the flat nnz array before passing it to scipy.
+        COO row/column indices for a sparse *jac_fn*.  When provided, flat nnz
+        values are returned to scipy as a CSR matrix.
     solver_options : dict, optional
         Initial options applied via :meth:`add_option`.
 
@@ -142,25 +142,25 @@ class _ScipyAdapter:
             ``mult_x_L``, ``mult_x_U``.  ``status`` uses IPOPT-compatible
             codes: 0 = Solved, -1 = MaxIter, 2 = Infeasible.
         """
+        from scipy import sparse
         from scipy.optimize import Bounds, NonlinearConstraint, minimize
 
         n, m = self._n, self._m
         bounds = Bounds(lb=self._xl, ub=self._xu, keep_feasible=False)
 
-        # Build a dense (m, n) Jacobian callable for scipy.
+        # Build a Jacobian callable for scipy. Sparse NLP paths return CSR
+        # matrices so trust-constr can avoid dense (m, n) allocations.
         jac_rows = self._jac_rows
         jac_cols = self._jac_cols
         raw_jac = self._jac_fn
 
         if jac_rows is not None:
-            # Sparse path: flat 1-D nnz values -> dense (m, n) matrix.
+            # Sparse path: flat 1-D nnz values -> CSR (m, n) matrix.
             def _jac(x):
                 vals = np.asarray(raw_jac(x), dtype=float)
                 if vals.ndim == 1:
-                    J = np.zeros((m, n))
-                    J[jac_rows, jac_cols] = vals
-                    return J
-                return np.asarray(vals, dtype=float)
+                    return sparse.csr_matrix((vals, (jac_rows, jac_cols)), shape=(m, n))
+                return sparse.csr_matrix(vals)
         else:
             def _jac(x):
                 J = np.asarray(raw_jac(x), dtype=float)

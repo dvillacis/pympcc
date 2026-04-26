@@ -5,12 +5,13 @@ import numpy as np
 
 from .._stationarity import classify_stationarity, compute_kkt_residual
 from ..result import IterationInfo, MPCCResult
-from ._base import BaseStrategy
+from ._base import CLEANUP_DEFAULTS, SAFEGUARD_DEFAULTS, BaseStrategy
 
 _INF = 2e19
 
 _DEFAULTS = dict(epsilon_0=1.0, reduction=0.1, max_iter=20, epsilon_min=1e-8,
-                 dual_warmstart=True, comp_tol=None)
+                 dual_warmstart=True, comp_tol=None,
+                 **SAFEGUARD_DEFAULTS, **CLEANUP_DEFAULTS)
 
 
 class LinFukushimaStrategy(BaseStrategy):
@@ -85,12 +86,22 @@ class LinFukushimaStrategy(BaseStrategy):
                          solver_options=kwargs.pop("solver_options", None),
                          callback=kwargs.pop("callback", None))
         opts = {**_DEFAULTS, **kwargs}
+        opts = self._maybe_resolve_auto_epsilon_0(opts)
+        self._validate_continuation_options(
+            epsilon_0=opts["epsilon_0"],
+            reduction=opts["reduction"],
+            max_iter=opts["max_iter"],
+            epsilon_min=opts["epsilon_min"],
+            comp_tol=opts["comp_tol"],
+        )
         self.epsilon_0: float = opts["epsilon_0"]
         self.reduction: float = opts["reduction"]
         self.max_iter: int = opts["max_iter"]
         self.epsilon_min: float = opts["epsilon_min"]
         self.dual_warmstart: bool = bool(opts["dual_warmstart"])
         self.comp_tol: float | None = opts["comp_tol"]
+        self._init_safeguards(opts)
+        self._init_cleanup(opts)
 
     def solve(self) -> MPCCResult:
         p = self.problem
@@ -125,11 +136,11 @@ class LinFukushimaStrategy(BaseStrategy):
         ])
 
         eps_ref = [self.epsilon_0]
+        cache = self._new_callback_cache()
 
         def constraints(x):
-            std_parts = self._eval_standard_con_values(x)
-            G = np.asarray(p.comp_G(x))
-            H = np.asarray(p.comp_H(x))
+            std_parts = self._eval_standard_con_values(x, cache)
+            G, H = self._eval_comp_values(x, cache)
             e = eps_ref[0]
             return np.concatenate([*std_parts, G, H, G * H - e, G + H - e])
 
@@ -178,10 +189,8 @@ class LinFukushimaStrategy(BaseStrategy):
 
         if p.is_sparse:
             def jacobian(x):
-                G = np.asarray(p.comp_G(x))
-                H = np.asarray(p.comp_H(x))
-                vG_raw = np.asarray(p.comp_G_jacobian(x), dtype=float)
-                vH_raw = np.asarray(p.comp_H_jacobian(x), dtype=float)
+                G, H = self._eval_comp_values(x, cache)
+                vG_raw, vH_raw = self._eval_comp_jac_raw(x, cache)
                 v_G = vG_raw.ravel() if vG_raw.ndim == 2 else vG_raw
                 v_H = vH_raw.ravel() if vH_raw.ndim == 2 else vH_raw
                 if union_maps is not None:
@@ -190,14 +199,14 @@ class LinFukushimaStrategy(BaseStrategy):
                         v_G, v_H, H, G, r_u, map1, map2, _union_buf1)
                     self._eval_weighted_union(
                         v_G, v_H, _ones, _ones, r_u, map1, map2, _union_buf2)
-                    std_flat = self._build_std_jac_flat(x)
+                    std_flat = self._build_std_jac_flat(x, cache)
                     _jac_flat_buf[:_off_G]         = std_flat
                     _jac_flat_buf[_off_G:_off_H]   = v_G
                     _jac_flat_buf[_off_H:_off_gh]  = v_H
                     # _jac_flat_buf[_off_gh:] already written by kernels via views
                     return _jac_flat_buf
                 else:
-                    std_flat = self._build_std_jac_flat(x)
+                    std_flat = self._build_std_jac_flat(x, cache)
                     JG = (vG_raw if vG_raw.ndim == 2
                           else self._to_dense_block(vG_raw, p.comp_G_jacobian_sparsity, p.n_comp, p.n))
                     JH = (vH_raw if vH_raw.ndim == 2
@@ -207,8 +216,8 @@ class LinFukushimaStrategy(BaseStrategy):
                     return np.concatenate([std_flat, v_G, v_H, gh_vals, gph_vals])
         else:
             def jacobian(x):
-                _, jac_rows = self._build_standard_constraints(x)
-                G, H, JG, JH = self._build_comp_jacobians(x)
+                _, jac_rows = self._build_standard_constraints(x, cache)
+                G, H, JG, JH = self._build_comp_jacobians(x, cache)
                 self._weighted_row_sum(H, JG, G, JH, _gh_buf)
                 np.add(JG, JH, out=_gph_buf)     # ∂(G+H)/∂x — in-place add
                 jac_rows.extend([JG, JH, _gh_buf, _gph_buf])
@@ -226,32 +235,8 @@ class LinFukushimaStrategy(BaseStrategy):
         nlp = self._build_nlp(cl, cu, constraints, jacobian, jac_structure,
                               hess_fn=hess_fn, hess_sparsity=hess_sparsity)
 
-        history: list[IterationInfo] = []
-        x = p.x0.copy()
-        eps = self.epsilon_0
-        last_info: dict = {}
-        warm_dual: dict = {}
-        total_time: float = 0.0
-
-        for k in range(self.max_iter):
-            eps_ref[0] = eps
-            nlp.n_ipopt_iter = 0
-            if k == 1 and self.dual_warmstart:
-                nlp.add_option("warm_start_init_point", "yes")
-            # Loose tolerance early (relaxed NLP is intermediate, not the final answer).
-            # Floor is the user's requested tol so we never over-solve final iterations.
-            nlp.add_option("tol", max(self.ipopt_options.get("tol", 1e-8), eps * 1e-2))
-            x, last_info, iter_time = self._timed_solve(nlp, x, warm_dual)
-            total_time += iter_time
-            if self.dual_warmstart:
-                warm_dual = {
-                    "lagrange": last_info["mult_g"],
-                    "zl":       last_info["mult_x_L"],
-                    "zu":       last_info["mult_x_U"],
-                }
-
-            G = np.asarray(p.comp_G(x))
-            H = np.asarray(p.comp_H(x))
+        def make_iteration(eps, x, last_info, n_ipopt_iter, iter_time):
+            G, H = self._eval_comp_values(x, cache)
             _off = n_g + n_h
             _lam_G   = last_info["mult_g"][_off             : _off + n_c]
             _lam_H   = last_info["mult_g"][_off + n_c       : _off + 2 * n_c]
@@ -264,7 +249,7 @@ class LinFukushimaStrategy(BaseStrategy):
                 mult_x_L=last_info.get("mult_x_L"),
                 mult_x_U=last_info.get("mult_x_U"),
             )
-            history.append(IterationInfo(
+            return IterationInfo(
                 epsilon=eps,
                 x=x.copy(),
                 obj=float(last_info["obj_val"]),
@@ -272,23 +257,16 @@ class LinFukushimaStrategy(BaseStrategy):
                 message=self._decode_msg(last_info["status_msg"]),
                 comp_residual=float(np.max(np.abs(G * H))),
                 comp_residual_mean=float(np.mean(np.abs(G * H))),
-                n_ipopt_iter=nlp.n_ipopt_iter,
+                n_ipopt_iter=n_ipopt_iter,
                 iter_time=iter_time,
                 kkt_residual=_kkt,
-            ))
-            if self.callback is not None:
-                self.callback(len(history) - 1, history[-1])
+            )
 
-            if (self.comp_tol is not None
-                    and history[-1].comp_residual < self.comp_tol
-                    and last_info["status"] in (0, 1, 3)):
-                break
-            eps *= self.reduction
-            if eps < self.epsilon_min:
-                break
+        x, last_info, total_time, history = self._run_epsilon_continuation(
+            nlp, p.x0, eps_ref, make_iteration
+        )
 
-        G = np.asarray(p.comp_G(x))
-        H = np.asarray(p.comp_H(x))
+        G, H = self._eval_comp_values(x, cache)
 
         result = MPCCResult(
             x=x,
@@ -315,11 +293,14 @@ class LinFukushimaStrategy(BaseStrategy):
         lam_H   = last_info["mult_g"][_off + n_c       : _off + 2 * n_c]
         lam_GH  = last_info["mult_g"][_off + 2 * n_c   : _off + 3 * n_c]
         lam_GPH = last_info["mult_g"][_off + 3 * n_c   : _off + 4 * n_c]
+        mpcc_mult_G = lam_G + result.H * lam_GH + lam_GPH
+        mpcc_mult_H = lam_H + result.G * lam_GH + lam_GPH
         result.kkt_residual = compute_kkt_residual(
             result, self.problem,
-            mpcc_mult_G=lam_G + result.H * lam_GH + lam_GPH,
-            mpcc_mult_H=lam_H + result.G * lam_GH + lam_GPH,
+            mpcc_mult_G=mpcc_mult_G,
+            mpcc_mult_H=mpcc_mult_H,
             mult_x_L=last_info.get("mult_x_L"),
             mult_x_U=last_info.get("mult_x_U"),
         )
+        result = self._maybe_run_cleanup(result, last_info, x, mpcc_mult_G, mpcc_mult_H)
         return result

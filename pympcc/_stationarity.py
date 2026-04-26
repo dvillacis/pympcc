@@ -57,7 +57,7 @@ import numpy as np
 from .problem import MPCCProblem
 from .result import MPCCResult
 
-__all__ = ["classify_stationarity", "compute_kkt_residual"]
+__all__ = ["classify_stationarity", "compute_kkt_residual", "verify_b_stationarity"]
 
 
 def classify_stationarity(
@@ -273,3 +273,199 @@ def compute_kkt_residual(
     r += _jac_T_vec(p.comp_H_jacobian(x), p.comp_H_jacobian_sparsity, p.n_comp, p.n, mpcc_mult_H)  # type: ignore[operator]
 
     return float(np.max(np.abs(r)))
+
+
+def verify_b_stationarity(
+    result: MPCCResult,
+    problem: MPCCProblem,
+    *,
+    tol: float = 1e-6,
+    max_biactive: int = 10,
+) -> dict:
+    """
+    Test B-stationarity of an MPCC solution by enumerating linearised-MPCC
+    tangent-cone branches and solving an LP per branch.
+
+    For each biactive pair ``i ∈ I_00 = {i : G_i(x*) ≤ tol AND H_i(x*) ≤ tol}``
+    the linearised tangent cone splits into two branches:
+
+      * **G branch** (G stays active): ``∇G_iᵀ d = 0,  ∇H_iᵀ d ≥ 0``
+      * **H branch** (H stays active): ``∇H_iᵀ d = 0,  ∇G_iᵀ d ≥ 0``
+
+    For every assignment of branches to the |I_00| pairs (2^|I_00| LPs),
+    solve::
+
+        min  ∇f(x*)ᵀ d
+        s.t. ∇g_jᵀ d ≤ 0          j active inequality (g_j(x*) ≥ -tol)
+             ∇hᵀ d   = 0
+             ∇G_iᵀ d = 0          i ∈ I_0+ (G_i = 0, H_i > 0 — H>0 locally
+                                              forces G_i to stay zero)
+             ∇H_iᵀ d = 0          i ∈ I_+0 (G_i > 0, H_i = 0 — G>0 locally
+                                              forces H_i to stay zero)
+             branch-specific G/H linearisations for i ∈ I_00
+             d_j ≥ 0  if x*_j is at xl_j;  d_j ≤ 0 if at xu_j
+             ‖d‖_∞ ≤ 1            (normalisation; LP would be unbounded)
+
+    ``x*`` is **B-stationary** iff every branch's LP minimum is ≥ 0
+    (no feasible first-order descent direction in the linearised cone).
+
+    Parameters
+    ----------
+    result : MPCCResult
+        A solved MPCC result (``result.x``, ``result.G``, ``result.H``,
+        ``result.success`` are read).
+    problem : MPCCProblem
+        The problem instance used to produce the result.
+    tol : float, optional
+        Tolerance for the active-set partition (default ``1e-6``).
+        Pair *i* is biactive when ``G_i ≤ tol AND H_i ≤ tol``;
+        a constraint ``g_j`` is active when ``g_j ≥ -tol``;
+        a variable bound is active when ``|x_j − xl_j| ≤ tol`` (resp. ``xu``).
+    max_biactive : int, optional
+        Skip when ``|I_00| > max_biactive`` (default ``10`` → up to 1024 LPs).
+
+    Returns
+    -------
+    dict
+        ``status`` : one of
+            ``"B-stationary"`` — every branch min ≥ -tol.
+            ``"not B-stationary"`` — at least one branch admits descent.
+            ``"intractable"`` — ``|I_00| > max_biactive``; LP enumeration skipped.
+            ``"unknown"`` — ``result.success is False``.
+        ``n_biactive`` : ``|I_00|``.
+        ``n_branches_checked`` : LPs actually solved (0 on early exit).
+        ``min_descent`` : minimum ∇fᵀd over branches (``None`` on early exit).
+        ``witness_branch`` : tuple of ``'G'`` / ``'H'`` chars indexed by
+            the biactive pairs in I_00 order; ``None`` if B-stationary.
+        ``witness_d`` : ndarray, shape ``(n,)`` — the descent direction;
+            ``None`` if B-stationary.
+
+    Notes
+    -----
+    Uses dense LPs (``scipy.optimize.linprog`` with method ``"highs"``).
+    Intended as a diagnostic for small/medium MPCCs; cost is
+    O(2^|I_00| · LP) and the per-LP build is dense in ``n``.
+
+    The strongest stationarity level reachable from KKT multipliers alone
+    (``classify_stationarity``) is S, which under MPCC-LICQ is equivalent
+    to B-stationarity. This routine *directly* certifies B-stationarity
+    without needing MPCC-LICQ to hold.
+    """
+    from scipy.optimize import linprog
+
+    p = problem
+    n = p.n
+
+    if not result.success:
+        return {
+            "status": "unknown",
+            "n_biactive": 0,
+            "n_branches_checked": 0,
+            "min_descent": None,
+            "witness_branch": None,
+            "witness_d": None,
+        }
+
+    G = np.asarray(result.G, dtype=float)
+    H = np.asarray(result.H, dtype=float)
+
+    I_00 = np.where((G <= tol) & (H <= tol))[0]
+    I_0p = np.where((G <= tol) & (H >  tol))[0]
+    I_p0 = np.where((G >  tol) & (H <= tol))[0]
+    n_bi = int(I_00.size)
+
+    if n_bi > max_biactive:
+        return {
+            "status": "intractable",
+            "n_biactive": n_bi,
+            "n_branches_checked": 0,
+            "min_descent": None,
+            "witness_branch": None,
+            "witness_d": None,
+        }
+
+    x = np.asarray(result.x, dtype=float)
+    grad = np.asarray(p.gradient(x), dtype=float)  # type: ignore[operator]
+
+    JG = _dense_jac(p.comp_G_jacobian(x), p.comp_G_jacobian_sparsity, p.n_comp, n)  # type: ignore[operator]
+    JH = _dense_jac(p.comp_H_jacobian(x), p.comp_H_jacobian_sparsity, p.n_comp, n)  # type: ignore[operator]
+
+    A_eq_base: list = []
+    A_ub_base: list = []
+
+    if p.n_eq:
+        Jh = _dense_jac(p.eq_jacobian(x), p.eq_jacobian_sparsity, p.n_eq, n)  # type: ignore[misc, operator]
+        A_eq_base.append(Jh)
+
+    if p.n_ineq and p.ineq_constraints is not None:
+        gvals = np.asarray(p.ineq_constraints(x), dtype=float)
+        Jg = _dense_jac(p.ineq_jacobian(x), p.ineq_jacobian_sparsity, p.n_ineq, n)  # type: ignore[misc, operator]
+        active = gvals >= -tol
+        if np.any(active):
+            A_ub_base.append(Jg[active])
+
+    # I_0p (G_i = 0, H_i > 0): H>0 locally forces ∇G_i·d = 0.
+    # I_p0 (G_i > 0, H_i = 0): G>0 locally forces ∇H_i·d = 0.
+    if I_0p.size:
+        A_eq_base.append(JG[I_0p])
+    if I_p0.size:
+        A_eq_base.append(JH[I_p0])
+
+    xl = np.asarray(p.xl, dtype=float) if p.xl is not None else np.full(n, -np.inf)
+    xu = np.asarray(p.xu, dtype=float) if p.xu is not None else np.full(n, np.inf)
+    bounds: list = []
+    for j in range(n):
+        lo, hi = -1.0, 1.0
+        if np.isfinite(xl[j]) and (x[j] - xl[j]) <= tol:
+            lo = 0.0
+        if np.isfinite(xu[j]) and (xu[j] - x[j]) <= tol:
+            hi = 0.0
+        if lo > hi:
+            lo = hi
+        bounds.append((lo, hi))
+
+    n_branches = 1 if n_bi == 0 else (1 << n_bi)
+    min_descent = 0.0
+    witness_branch = None
+    witness_d = None
+
+    for branch_idx in range(n_branches):
+        A_eq_rows = list(A_eq_base)
+        A_ub_rows = list(A_ub_base)
+        chars: list = []
+        for k, i in enumerate(I_00):
+            bit = (branch_idx >> k) & 1
+            if bit == 0:
+                A_eq_rows.append(JG[i:i + 1])
+                A_ub_rows.append(-JH[i:i + 1])
+                chars.append("G")
+            else:
+                A_eq_rows.append(JH[i:i + 1])
+                A_ub_rows.append(-JG[i:i + 1])
+                chars.append("H")
+
+        A_eq = np.vstack(A_eq_rows) if A_eq_rows else None
+        b_eq = np.zeros(A_eq.shape[0]) if A_eq is not None else None
+        A_ub = np.vstack(A_ub_rows) if A_ub_rows else None
+        b_ub = np.zeros(A_ub.shape[0]) if A_ub is not None else None
+
+        lp = linprog(grad, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
+                     bounds=bounds, method="highs")
+        if not lp.success:
+            continue
+
+        if lp.fun < min_descent:
+            min_descent = float(lp.fun)
+            if lp.fun < -tol:
+                witness_branch = tuple(chars)
+                witness_d = np.asarray(lp.x, dtype=float)
+
+    status = "not B-stationary" if witness_d is not None else "B-stationary"
+    return {
+        "status": status,
+        "n_biactive": n_bi,
+        "n_branches_checked": n_branches,
+        "min_descent": float(min_descent),
+        "witness_branch": witness_branch,
+        "witness_d": witness_d,
+    }

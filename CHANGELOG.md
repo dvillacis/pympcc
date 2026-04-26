@@ -7,6 +7,74 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.3.0] - 2026-04-26
+
+### Added
+
+**Presolve layer (`pympcc.presolve`, `pympcc.PresolveMap`)**
+- Opt-in via `solve(problem, presolve=True)` or `MPCCSolver(problem, presolve=True)`;
+  runs once at solver construction, returns a reduced problem to the strategy, then
+  expands the result back to the original variable space
+- A1 — pinned-variable elimination: substitutes out every `j` with `xl[j] == xu[j]`
+- A2 — feasibility-based bound tightening (FBBT) over linear constraints; iterates to
+  fixpoint and pins variables whose bounds collapse
+- A4 — empty Jacobian row / column pruning: drops constraints with no nonzero
+  Jacobian entries and variables with no nonzero column
+- B1 — dead complementarity-pair pruning: drops pairs where one side is structurally
+  zero and trivially satisfied at `x0`
+- B2 — forced complementarity-pair detection: pairs where both sides are linear
+  with a forced sign get reduced to a single equality
+- B3 — prefix-equality pass: identifies linear comp pairs whose sign is determined
+  by domain bounds and rewrites them as equalities; emits an infeasibility warning
+  when both sides are forced strictly positive
+- `PresolveMap.expand_result` re-evaluates `comp_G`/`comp_H` on the original problem,
+  scatters `result.x` and per-iteration `history[k].x` back to the original size, and
+  zero-pads multipliers / unit-pads pair scales for pruned indices
+
+**Constraint qualification diagnostics (`pympcc.classify_cq`, `pympcc.active_sets`)**
+- Opt-in via `solve(problem, diagnostics=True)`; the result gains
+  `result.cq` ∈ {`"MPCC-LICQ"`, `"MPCC-MFCQ"`, `"none"`},
+  `result.cq_active_set_sizes`, and `result.cq_rank_deficit`
+- `active_sets(result, problem, tol)` returns the index partition
+  `{I_g, I_G, I_H, I_00, I_xL, I_xU}`; LICQ tested via SVD rank of the stacked
+  active-gradient matrix; MFCQ tested via an LP direction-finding subproblem
+  (HiGHS) that maximises strict-descent slack subject to the active eq-block
+  and bound-respecting branches
+
+**B-stationarity auto-attached**
+- With `diagnostics=True`, `verify_b_stationarity` runs after the inner solve
+  and populates `result.b_stationary`, `result.b_stationary_witness`, and
+  `result.b_stationary_min_descent`
+- `MPCCSolver(..., b_stat_max_biactive=10)` caps the biactive-branch enumeration
+  to keep the verification cheap on large problems
+
+**`MPCCResult` extensions**
+- Six new fields: `cq`, `cq_active_set_sizes`, `cq_rank_deficit`,
+  `b_stationary`, `b_stationary_witness`, `b_stationary_min_descent`. All default
+  to `None`; populated only when `diagnostics=True`
+
+### Fixed
+
+**B-stationarity tangent cone at I_p0 / I_0p (behaviour change)**
+- `verify_b_stationarity` previously linearised the strict-positive sides of the
+  biactive branches as inequalities (`∇G_i·d ≥ 0` on I_0p, `∇H_i·d ≥ 0` on I_p0).
+  The MPCC linearised tangent cone forces these to *equalities*: a strictly
+  positive component locally pins the zero-side gradient direction. The
+  inequality form admitted spurious descent directions and could falsely flag
+  some genuine global optima as not-B-stationary. Fixed by appending `JG[I_0p]`
+  and `JH[I_p0]` to the equality block instead of the inequality block in
+  `_stationarity.py`. All seven existing B-stat tests continue to pass
+
+### Tests
+
+- 635 passed, 1 skipped, 54 xfailed (was 569 in 0.2.0)
+- New: `test_presolve.py`, `test_fbbt.py`, `test_empty_rows_cols.py`,
+  `test_forced_pair.py`, `test_prefix_eq.py`, `test_diagnostics.py`,
+  `test_b_stationarity.py`, `test_auto_epsilon_0.py`, `test_problem_scaling.py`,
+  `test_restoration_awareness.py`, `test_rollback_backoff.py`
+
+---
+
 ## [0.2.0] - 2026-04-23
 
 ### Added

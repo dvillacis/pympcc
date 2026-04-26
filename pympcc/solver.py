@@ -5,6 +5,9 @@ import logging
 from typing import Callable, Literal, Optional, Union
 
 from ._kernels import HAS_NUMBA
+from ._diagnostics import classify_cq as _classify_cq
+from ._presolve import PresolveMap, presolve as _presolve
+from ._stationarity import verify_b_stationarity as _verify_b_stat
 from .models import StructuredMPCC
 from .problem import MPCCProblem
 from .result import IPOPTStatus, IterationInfo, MPCCResult
@@ -160,6 +163,9 @@ class MPCCSolver:
         solver_options: dict | None = None,
         callback: Optional[Callable[[int, IterationInfo], None]] = None,
         verbose: bool = False,
+        presolve: bool = False,
+        diagnostics: bool = False,
+        b_stat_max_biactive: int = 10,
         **strategy_options,
     ) -> None:
         if strategy not in _STRATEGIES:
@@ -172,6 +178,10 @@ class MPCCSolver:
                 f"Unknown backend {backend!r}. "
                 f"Choose 'ipopt', 'filterSQP', or 'scipy'."
             )
+        # Pop linear_solver_fn before the _VALID_OPTIONS check: it's a solver-level
+        # option, not a strategy option, and it bypasses IPOPT's built-in linear solver.
+        linear_solver_fn = strategy_options.pop("linear_solver_fn", None)
+
         strategy_cls = _STRATEGIES[strategy]
         valid_opts: frozenset = getattr(strategy_cls, "_VALID_OPTIONS", frozenset())
         unknown = set(strategy_options) - valid_opts
@@ -181,7 +191,11 @@ class MPCCSolver:
                 f"{sorted(unknown)}. "
                 f"Valid options: {sorted(valid_opts) if valid_opts else '(none)'}"
             )
-        self.problem = _as_mpcc_problem(problem)
+        self.problem_orig = _as_mpcc_problem(problem)
+        if presolve:
+            self.problem, self._presolve_map = _presolve(self.problem_orig)
+        else:
+            self.problem, self._presolve_map = self.problem_orig, None
         self.strategy_name = strategy
         self.backend = backend
         self.ipopt_options = {**_DEFAULT_IPOPT_OPTIONS, **(ipopt_options or {})}
@@ -197,12 +211,42 @@ class MPCCSolver:
             callback=callback,
             **strategy_options,
         )
+        # linear_solver_fn bypasses the strategy's _VALID_OPTIONS and is injected
+        # directly so individual strategies don't need to forward it.
+        if linear_solver_fn is not None:
+            self._strategy._linear_solver_fn = linear_solver_fn
+        self._diagnostics = diagnostics
+        self._b_stat_max_biactive = b_stat_max_biactive
 
     def solve(self) -> MPCCResult:
         """Run the solver and return an :class:`MPCCResult`."""
         if self._verbose:
             _print_verbose_preamble(self.problem, self.strategy_name, self.backend)
-        return self._strategy.solve()
+        result = self._strategy.solve()
+        # Propagate complementarity-pair scaling (if any) to the result so
+        # downstream callers can recover unscaled multipliers.  Done here in
+        # one place rather than in every strategy.
+        if self.problem.comp_G_scale is not None:
+            result.comp_G_scale = self.problem.comp_G_scale
+        if self.problem.comp_H_scale is not None:
+            result.comp_H_scale = self.problem.comp_H_scale
+        if self._presolve_map is not None and not self._presolve_map.is_identity:
+            result = self._presolve_map.expand_result(result, self.problem_orig)
+        if self._diagnostics:
+            self._attach_diagnostics(result)
+        return result
+
+    def _attach_diagnostics(self, result: MPCCResult) -> None:
+        """Run §2.1 / §2.2 diagnostics on the original-space result."""
+        cq = _classify_cq(result, self.problem_orig)
+        result.cq = cq["cq"]
+        result.cq_active_set_sizes = cq["active_set_sizes"]
+        result.cq_rank_deficit = cq["rank_deficit"]
+        bs = _verify_b_stat(result, self.problem_orig,
+                            max_biactive=self._b_stat_max_biactive)
+        result.b_stationary = bs["status"]
+        result.b_stationary_witness = bs["witness_branch"]
+        result.b_stationary_min_descent = bs["min_descent"]
 
 
 def solve(
@@ -213,6 +257,9 @@ def solve(
     solver_options: dict | None = None,
     callback: Optional[Callable[[int, IterationInfo], None]] = None,
     verbose: bool = False,
+    presolve: bool = False,
+    diagnostics: bool = False,
+    b_stat_max_biactive: int = 10,
     **strategy_options,
 ) -> MPCCResult:
     """
@@ -282,5 +329,8 @@ def solve(
         ipopt_options=ipopt_options,
         solver_options=solver_options,
         callback=callback, verbose=verbose,
+        presolve=presolve,
+        diagnostics=diagnostics,
+        b_stat_max_biactive=b_stat_max_biactive,
         **strategy_options,
     ).solve()

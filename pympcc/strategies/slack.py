@@ -5,13 +5,14 @@ import numpy as np
 
 from .._stationarity import compute_kkt_residual
 from ..result import IterationInfo, MPCCResult
-from ._base import BaseStrategy
+from ._base import CLEANUP_DEFAULTS, SAFEGUARD_DEFAULTS, BaseStrategy
 
 _INF = 2e19
 
 _DEFAULTS = dict(
     epsilon_0=1.0, reduction=0.1, max_iter=20,
     epsilon_min=1e-8, dual_warmstart=True, comp_tol=None,
+    **SAFEGUARD_DEFAULTS, **CLEANUP_DEFAULTS,
 )
 
 _STAT_TOL = 1e-6   # geometric tolerance for biactive-set detection
@@ -88,12 +89,22 @@ class SlackStrategy(BaseStrategy):
                          solver_options=kwargs.pop("solver_options", None),
                          callback=kwargs.pop("callback", None))
         opts = {**_DEFAULTS, **kwargs}
+        opts = self._maybe_resolve_auto_epsilon_0(opts)
+        self._validate_continuation_options(
+            epsilon_0=opts["epsilon_0"],
+            reduction=opts["reduction"],
+            max_iter=opts["max_iter"],
+            epsilon_min=opts["epsilon_min"],
+            comp_tol=opts["comp_tol"],
+        )
         self.epsilon_0: float = opts["epsilon_0"]
         self.reduction: float = opts["reduction"]
         self.max_iter: int = opts["max_iter"]
         self.epsilon_min: float = opts["epsilon_min"]
         self.dual_warmstart: bool = bool(opts["dual_warmstart"])
         self.comp_tol: float | None = opts["comp_tol"]
+        self._init_safeguards(opts)
+        self._init_cleanup(opts)
 
     # ------------------------------------------------------------------ #
     # Lifted-space helpers                                                 #
@@ -304,14 +315,14 @@ class SlackStrategy(BaseStrategy):
         ])
 
         eps_ref = [self.epsilon_0]
+        cache = self._new_callback_cache()
 
         def constraints(z: np.ndarray) -> np.ndarray:
             x   = z[:n]
             s_G = z[col_sG:col_sH]
             s_H = z[col_sH:]
-            std_parts = self._eval_standard_con_values(x)
-            G = np.asarray(p.comp_G(x))
-            H = np.asarray(p.comp_H(x))
+            std_parts = self._eval_standard_con_values(x, cache)
+            G, H = self._eval_comp_values(x, cache)
             return np.concatenate([*std_parts, G - s_G, H - s_H, s_G * s_H - eps_ref[0]])
 
         # Pre-allocate the full flat Jacobian output (fixed size = total nnz).
@@ -347,20 +358,19 @@ class SlackStrategy(BaseStrategy):
             s_H = z[col_sH:]
             # g block
             if p.n_ineq > 0:
-                J = np.asarray(p.ineq_jacobian(x), dtype=float)  # type: ignore[misc, operator]
+                J = self._build_std_jac_flat(x, cache)[:_seg_g]
                 v = J if J.ndim == 1 else J.ravel()
                 _jac_buf[_off_g:_off_g + _seg_g] = v
             # h block
             if p.n_eq > 0:
-                J = np.asarray(p.eq_jacobian(x), dtype=float)  # type: ignore[misc, operator]
+                J = self._build_std_jac_flat(x, cache)[_seg_g:_seg_g + _seg_h]
                 v = J if J.ndim == 1 else J.ravel()
                 _jac_buf[_off_h:_off_h + _seg_h] = v
             # G-pinning x-block
-            vG = np.asarray(p.comp_G_jacobian(x), dtype=float)  # type: ignore[operator]
+            vG, vH = self._eval_comp_jac_raw(x, cache)
             _jac_buf[_off_JG:_off_JG + _seg_JG] = (
                 vG if vG.ndim == 1 else vG.ravel())
             # H-pinning x-block
-            vH = np.asarray(p.comp_H_jacobian(x), dtype=float)  # type: ignore[operator]
             _jac_buf[_off_JH:_off_JH + _seg_JH] = (
                 vH if vH.ndim == 1 else vH.ravel())
             # s_G · s_H: diag(s_H) for s_G cols, diag(s_G) for s_H cols
@@ -384,8 +394,7 @@ class SlackStrategy(BaseStrategy):
 
         # Initialise lifted variable vector
         x = p.x0.copy()
-        G0 = np.asarray(p.comp_G(x))
-        H0 = np.asarray(p.comp_H(x))
+        G0, H0 = self._eval_comp_values(x, cache)
         z = np.concatenate([x, np.maximum(G0, 0.0), np.maximum(H0, 0.0)])
 
         # Build the NLP once — bounds are static, ε enters via eps_ref closure.
@@ -396,35 +405,21 @@ class SlackStrategy(BaseStrategy):
             hess_fn=hess_fn, hess_sparsity=hess_sparsity,
         )
 
-        history: list[IterationInfo] = []
-        eps = self.epsilon_0
-        last_info: dict = {}
-        warm_dual: dict = {}
-        total_time: float = 0.0
-
-        for k in range(self.max_iter):
-            eps_ref[0] = eps
-            nlp.n_ipopt_iter = 0
-            if k == 1 and self.dual_warmstart:
-                nlp.add_option("warm_start_init_point", "yes")
-            # Loose tolerance early (relaxed NLP is intermediate, not the final answer).
-            # Floor is the user's requested tol so we never over-solve final iterations.
-            nlp.add_option("tol", max(self.ipopt_options.get("tol", 1e-8), eps * 1e-2))
-            z, last_info, iter_time = self._timed_solve(nlp, z, warm_dual)
-            total_time += iter_time
-            if self.dual_warmstart:
-                warm_dual = {
-                    "lagrange": last_info["mult_g"],
-                    "zl":       last_info["mult_x_L"],
-                    "zu":       last_info["mult_x_U"],
-                }
-
-            x   = z[:n]
+        def make_iteration(eps, z, last_info, n_ipopt_iter, iter_time):
+            x = z[:n]
             s_G = z[col_sG:col_sH]
             s_H = z[col_sH:]
             comp_residual = float(np.max(np.abs(s_G * s_H)))
             comp_residual_mean = float(np.mean(np.abs(s_G * s_H)))
-            history.append(IterationInfo(
+            _off = p.n_ineq + p.n_eq
+            _kkt = self._compute_kkt_iter(
+                x, last_info["mult_g"],
+                mpcc_mult_G=last_info["mult_g"][_off       : _off + n_c],
+                mpcc_mult_H=last_info["mult_g"][_off + n_c : _off + 2 * n_c],
+                mult_x_L=last_info.get("mult_x_L"),
+                mult_x_U=last_info.get("mult_x_U"),
+            )
+            return IterationInfo(
                 epsilon=eps,
                 x=x.copy(),
                 obj=float(p.objective(x)),
@@ -432,23 +427,17 @@ class SlackStrategy(BaseStrategy):
                 message=self._decode_msg(last_info["status_msg"]),
                 comp_residual=comp_residual,
                 comp_residual_mean=comp_residual_mean,
-                n_ipopt_iter=nlp.n_ipopt_iter,
+                n_ipopt_iter=n_ipopt_iter,
                 iter_time=iter_time,
-            ))
-            if self.callback is not None:
-                self.callback(len(history) - 1, history[-1])
+                kkt_residual=_kkt,
+            )
 
-            if (self.comp_tol is not None
-                    and history[-1].comp_residual < self.comp_tol
-                    and last_info["status"] in (0, 1, 3)):
-                break
-            eps *= self.reduction
-            if eps < self.epsilon_min:
-                break
+        z, last_info, total_time, history = self._run_epsilon_continuation(
+            nlp, z, eps_ref, make_iteration
+        )
 
         x = z[:n]
-        G = np.asarray(p.comp_G(x))
-        H = np.asarray(p.comp_H(x))
+        G, H = self._eval_comp_values(x, cache)
 
         # Stationarity: multiplier signs are ambiguous in the lifted formulation.
         biactive = np.where((G <= _STAT_TOL) & (H <= _STAT_TOL))[0]
@@ -475,11 +464,16 @@ class SlackStrategy(BaseStrategy):
         # needed since the G*H constraint acts on slacks, not on x.
         # Bound multipliers are for z=[x,sG,sH]; only the first n entries apply to x.
         _off = p.n_ineq + p.n_eq
+        mpcc_mult_G = last_info["mult_g"][_off       : _off + n_c]
+        mpcc_mult_H = last_info["mult_g"][_off + n_c : _off + 2 * n_c]
         result.kkt_residual = compute_kkt_residual(
             result, p,
-            mpcc_mult_G=last_info["mult_g"][_off       : _off + n_c],
-            mpcc_mult_H=last_info["mult_g"][_off + n_c : _off + 2 * n_c],
+            mpcc_mult_G=mpcc_mult_G,
+            mpcc_mult_H=mpcc_mult_H,
             mult_x_L=last_info.get("mult_x_L"),
             mult_x_U=last_info.get("mult_x_U"),
+        )
+        result = self._maybe_run_cleanup(
+            result, last_info, x, mpcc_mult_G, mpcc_mult_H,
         )
         return result

@@ -1,6 +1,8 @@
 # Python-generated files
 __pycache__/
 *.py[oc]
+*.so
+pympcc/cython/_custom_solver.cpp
 build/
 dist/
 wheels/
@@ -11,8 +13,11 @@ wheels/
 # Claude
 .claude/
 
-# Pytest
+# Pytest / coverage
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 .venv/
 

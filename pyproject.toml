@@ -1,6 +1,6 @@
 [project]
 name = "pympcc"
-version = "0.2.1"
+version = "0.3.0"
 description = "Python solver for Mathematical Programs with Complementarity Constraints (MPCC) using IPOPT via cyipopt"
 readme = "README.md"
 license = { text = "MIT" }
@@ -24,7 +24,6 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=1.24",
-    "cyipopt>=1.3",
 ]
 
 [project.urls]
@@ -34,11 +33,14 @@ Changelog = "https://github.com/davidvillacis/pympcc/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
+    "cython>=3.2.4",
+    "cyipopt>=1.3",
     "pytest>=7.0",
     "pytest-cov",
     "ruff>=0.4",
     "mypy>=1.10",
 ]
+ipopt = ["cyipopt>=1.3"]
 numba = ["numba>=0.57"]
 jax = ["jax>=0.4"]
 scipy = ["scipy>=1.10"]
@@ -49,6 +51,18 @@ build-backend = "hatchling.build"
 
 [tool.hatchling.build.targets.wheel]
 packages = ["pympcc"]
+
+[tool.hatchling.build.targets.sdist]
+exclude = [
+    ".coverage",
+    ".coverage.*",
+    "htmlcov/",
+    ".pytest_cache/",
+    ".ruff_cache/",
+    ".mypy_cache/",
+    "build/",
+    "CLAUDE.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -87,3 +101,8 @@ python_version = "3.11"
 ignore_missing_imports = true
 warn_unused_ignores = true
 no_implicit_reexport = false
+
+[dependency-groups]
+dev = [
+    "cython>=3.2.4",
+]

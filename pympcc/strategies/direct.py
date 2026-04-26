@@ -76,10 +76,11 @@ class DirectStrategy(BaseStrategy):
             np.zeros(n_c),
         ])
 
+        cache = self._new_callback_cache()
+
         def constraints(x):
-            std_parts = self._eval_standard_con_values(x)
-            G = np.asarray(p.comp_G(x))
-            H = np.asarray(p.comp_H(x))
+            std_parts = self._eval_standard_con_values(x, cache)
+            G, H = self._eval_comp_values(x, cache)
             return np.concatenate([*std_parts, G, H, G * H])
 
         union_maps = self._make_union_maps(
@@ -101,11 +102,9 @@ class DirectStrategy(BaseStrategy):
 
         if p.is_sparse:
             def jacobian(x):
-                std_flat = self._build_std_jac_flat(x)
-                G = np.asarray(p.comp_G(x))
-                H = np.asarray(p.comp_H(x))
-                vG_raw = np.asarray(p.comp_G_jacobian(x), dtype=float)
-                vH_raw = np.asarray(p.comp_H_jacobian(x), dtype=float)
+                std_flat = self._build_std_jac_flat(x, cache)
+                G, H = self._eval_comp_values(x, cache)
+                vG_raw, vH_raw = self._eval_comp_jac_raw(x, cache)
                 v_G = vG_raw.ravel() if vG_raw.ndim == 2 else vG_raw
                 v_H = vH_raw.ravel() if vH_raw.ndim == 2 else vH_raw
                 if union_maps is not None:
@@ -121,8 +120,8 @@ class DirectStrategy(BaseStrategy):
                 return np.concatenate([std_flat, v_G, v_H, gh_vals])
         else:
             def jacobian(x):
-                _, jac_rows = self._build_standard_constraints(x)
-                G, H, JG, JH = self._build_comp_jacobians(x)
+                _, jac_rows = self._build_standard_constraints(x, cache)
+                G, H, JG, JH = self._build_comp_jacobians(x, cache)
                 self._weighted_row_sum(H, JG, G, JH, _gh_buf)
                 jac_rows.extend([JG, JH, _gh_buf])
                 return np.vstack(jac_rows)
@@ -139,8 +138,7 @@ class DirectStrategy(BaseStrategy):
                                hess_fn=hess_fn, hess_sparsity=hess_sparsity)
         x, info, solve_time = self._timed_solve(nlp, p.x0, {})
 
-        G = np.asarray(p.comp_G(x))
-        H = np.asarray(p.comp_H(x))
+        G, H = self._eval_comp_values(x, cache)
 
         result = MPCCResult(
             x=x,

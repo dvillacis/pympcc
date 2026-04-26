@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 import pympcc
+
 from .macmpec_problems import PROBLEM_NAMES
 
 try:
@@ -793,6 +794,48 @@ class TestScipyBackend:
         result = pympcc.solve(SIMPLE_SPARSE, strategy="scholtes", backend="scipy")
         assert result.success
         assert result.comp_residual < 1e-4
+
+    def test_sparse_backend_passes_sparse_jacobian_to_scipy(self, monkeypatch):
+        from types import SimpleNamespace
+
+        import scipy.optimize
+        from scipy import sparse
+
+        from pympcc._scipy_adapter import _ScipyAdapter
+
+        captured = {}
+
+        def fake_minimize(fun, x0, jac, method, bounds, constraints, tol, options):
+            J = constraints.jac(x0)
+            captured["is_sparse"] = sparse.issparse(J)
+            captured["shape"] = J.shape
+            return SimpleNamespace(
+                success=True,
+                fun=float(fun(x0)),
+                x=np.asarray(x0, dtype=float),
+                nit=0,
+                message="ok",
+                v=[np.zeros(1)],
+            )
+
+        monkeypatch.setattr(scipy.optimize, "minimize", fake_minimize)
+        adapter = _ScipyAdapter(
+            n=2, m=1,
+            xl=np.full(2, -np.inf),
+            xu=np.full(2, np.inf),
+            cl=np.array([0.0]),
+            cu=np.array([0.0]),
+            obj_fn=lambda x: float(x @ x),
+            grad_fn=lambda x: 2.0 * x,
+            con_fn=lambda x: np.array([x[0] + x[1]]),
+            jac_fn=lambda x: np.array([1.0, 1.0]),
+            jac_rows=np.array([0, 0]),
+            jac_cols=np.array([0, 1]),
+        )
+
+        adapter.solve(np.array([0.5, 0.5]))
+
+        assert captured == {"is_sparse": True, "shape": (1, 2)}
 
     def test_matches_ipopt_solution(self):
         """scipy and IPOPT backends must agree on the solution to within 1e-2."""

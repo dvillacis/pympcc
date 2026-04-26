@@ -99,16 +99,36 @@ class _DenseNLP(cyipopt.Problem):
             self._cols = np.empty(0, dtype=int)
 
         self.n_ipopt_iter: int = 0
+        # Restoration-phase tracking — populated by intermediate().
+        self.entered_restoration: bool = False
+        self.restoration_iter_count: int = 0
+        self.last_alg_mod: int = 0
         super().__init__(n=n, m=m, lb=xl, ub=xu, cl=cl, cu=cu)
 
     # ------------------------------------------------------------------ #
     # cyipopt interface                                                    #
     # ------------------------------------------------------------------ #
 
+    def reset_iter_counters(self) -> None:
+        """Zero per-solve diagnostic counters; called by strategies before
+        each inner ``nlp.solve`` so counters reflect a single attempt."""
+        self.n_ipopt_iter = 0
+        self.entered_restoration = False
+        self.restoration_iter_count = 0
+        self.last_alg_mod = 0
+
     def intermediate(self, alg_mod, iter_count, obj_value, inf_pr, inf_du,
                      mu, d_norm, regularization_size, alpha_du, alpha_pr,
                      ls_trials) -> bool:
         self.n_ipopt_iter = iter_count + 1
+        self.last_alg_mod = int(alg_mod)
+        # alg_mod == 1 indicates IPOPT is inside the restoration phase
+        # (feasibility-restoration sub-NLP).  Persistent restoration is
+        # the strongest signal that the current ε is too tight for the
+        # local geometry — strategies use this to force a rollback.
+        if alg_mod == 1:
+            self.entered_restoration = True
+            self.restoration_iter_count += 1
         return True
 
     def objective(self, x: np.ndarray) -> float:
@@ -162,6 +182,7 @@ class _SparseNLP(cyipopt.Problem):
         jac_cols: np.ndarray,
         hess_fn=None,
         hess_sparsity=None,
+        linear_solver_fn=None,
     ) -> None:
         self._n = n
         self._m = m
@@ -194,13 +215,38 @@ class _SparseNLP(cyipopt.Problem):
             self._hess_cols = np.asarray(hess_sparsity[1], dtype=np.intp)
         else:
             self._hess_rows = self._hess_cols = None
+        # Custom linear solver — when set, solve() routes through our C++ bridge
+        # instead of cyipopt.  Store bounds for PyTNLP construction.
+        self._linear_solver_fn = linear_solver_fn
+        if linear_solver_fn is not None:
+            self._xl = xl
+            self._xu = xu
+            self._cl = cl
+            self._cu = cu
+            self._ipopt_opts: dict = {}
         self.n_ipopt_iter: int = 0
+        # Restoration-phase tracking — populated by intermediate().
+        self.entered_restoration: bool = False
+        self.restoration_iter_count: int = 0
+        self.last_alg_mod: int = 0
         super().__init__(n=n, m=m, lb=xl, ub=xu, cl=cl, cu=cu)
+
+    def reset_iter_counters(self) -> None:
+        """Zero per-solve diagnostic counters; called by strategies before
+        each inner ``nlp.solve`` so counters reflect a single attempt."""
+        self.n_ipopt_iter = 0
+        self.entered_restoration = False
+        self.restoration_iter_count = 0
+        self.last_alg_mod = 0
 
     def intermediate(self, alg_mod, iter_count, obj_value, inf_pr, inf_du,
                      mu, d_norm, regularization_size, alpha_du, alpha_pr,
                      ls_trials) -> bool:
         self.n_ipopt_iter = iter_count + 1
+        self.last_alg_mod = int(alg_mod)
+        if alg_mod == 1:
+            self.entered_restoration = True
+            self.restoration_iter_count += 1
         return True
 
     def objective(self, x: np.ndarray) -> float:
@@ -224,3 +270,66 @@ class _SparseNLP(cyipopt.Problem):
                 return J[self._jac_order]
             return J                              # sparse-native: already nnz values
         return J[self._jac_rows, self._jac_cols]   # legacy: extract from dense matrix  # pragma: no cover
+
+    def add_option(self, key: str, val) -> None:
+        if self._linear_solver_fn is not None:
+            self._ipopt_opts[key] = val
+        super().add_option(key, val)
+
+    def solve(self, x0, lagrange=None, zl=None, zu=None):
+        """Solve the NLP.
+
+        When *linear_solver_fn* was supplied at construction, delegates to
+        :func:`pympcc.cython._custom_solver.solve_with_preconditioner` (our
+        C++ IPOPT bridge).  Otherwise falls through to :meth:`cyipopt.Problem.solve`.
+        """
+        if lagrange is None:
+            lagrange = []
+        if zl is None:
+            zl = []
+        if zu is None:
+            zu = []
+
+        if self._linear_solver_fn is None:
+            return super().solve(x0, lagrange=lagrange, zl=zl, zu=zu)
+
+        from .cython._custom_solver import PyTNLP, solve_with_preconditioner
+
+        # Hessian wrapper: reorder args from cyipopt convention (x, lagrange, obj_factor)
+        # to PyTNLP convention (x, obj_factor, lambda).
+        hess_fn = None
+        hess_rows = None
+        hess_cols = None
+        if self._hess_fn is not None:
+            def hess_fn(x, obj_factor, lam):  # noqa: E306
+                return self.hessian(x, lam, obj_factor)
+            hess_rows = (np.asarray(self._hess_rows, dtype=np.int32)
+                         if self._hess_rows is not None else None)
+            hess_cols = (np.asarray(self._hess_cols, dtype=np.int32)
+                         if self._hess_cols is not None else None)
+
+        # Mirror cyipopt: set hessian_approximation when no exact Hessian is provided.
+        opts = dict(self._ipopt_opts)
+        if hess_fn is None and "hessian_approximation" not in opts:
+            opts["hessian_approximation"] = "limited-memory"
+
+        tnlp = PyTNLP(
+            n=self._n, m=self._m,
+            xl=self._xl, xu=self._xu,
+            cl=self._cl, cu=self._cu,
+            obj_fn=self.objective,
+            grad_fn=self.gradient,
+            con_fn=self.constraints,
+            jac_fn=self.jacobian,
+            jac_rows=np.asarray(self._jac_rows, dtype=np.int32),
+            jac_cols=np.asarray(self._jac_cols, dtype=np.int32),
+            hess_fn=hess_fn,
+            hess_rows=hess_rows,
+            hess_cols=hess_cols,
+            x0=np.asarray(x0, dtype=np.float64),
+            lagrange0=(np.asarray(lagrange, dtype=np.float64)
+                       if len(lagrange) > 0 else None),
+            zl0=(np.asarray(zl, dtype=np.float64) if len(zl) > 0 else None),
+            zu0=(np.asarray(zu, dtype=np.float64) if len(zu) > 0 else None),
+        )
+        return solve_with_preconditioner(tnlp, self._linear_solver_fn, opts)

@@ -22,10 +22,16 @@ Quickstart
 >>> result.success    # convergence flag
 """
 
-from ._stationarity import classify_stationarity, compute_kkt_residual
+from ._diagnostics import active_sets, classify_cq
+from ._presolve import PresolveMap, presolve
+from ._stationarity import (
+    classify_stationarity,
+    compute_kkt_residual,
+    verify_b_stationarity,
+)
 from .models import StructuredMPCC
 from .problem import MPCCProblem
-from .result import IPOPTStatus, IterationInfo, MPCCResult
+from .result import IPOPTStatus, IterationInfo, MPCCResult, unscale_multipliers
 from .solver import MPCCSolver, solve
 
 __all__ = [
@@ -36,7 +42,13 @@ __all__ = [
     "IPOPTStatus",
     "MPCCSolver",
     "solve",
+    "active_sets",
+    "classify_cq",
     "classify_stationarity",
     "compute_kkt_residual",
+    "verify_b_stationarity",
+    "unscale_multipliers",
+    "presolve",
+    "PresolveMap",
 ]
-__version__ = "0.1.0"
+__version__ = "0.3.0"

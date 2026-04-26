@@ -6,7 +6,7 @@ import numpy as np
 from .._kernels import scatter_add as _scatter_add
 from .._stationarity import classify_stationarity, compute_kkt_residual
 from ..result import IterationInfo, MPCCResult
-from ._base import BaseStrategy
+from ._base import CLEANUP_DEFAULTS, BaseStrategy
 
 _INF = 2e19
 
@@ -19,6 +19,7 @@ _DEFAULTS = dict(
     comp_tol=1e-8,
     dual_warmstart=True,
     stagnation_iters=5,
+    **CLEANUP_DEFAULTS,
 )
 
 
@@ -167,6 +168,15 @@ class AugmentedLagrangianStrategy(BaseStrategy):
                          solver_options=kwargs.pop("solver_options", None),
                          callback=kwargs.pop("callback", None))
         opts = {**_DEFAULTS, **kwargs}
+        self._validate_augmented_lagrangian_options(
+            rho_0=opts["rho_0"],
+            rho_max=opts["rho_max"],
+            tau=opts["tau"],
+            eta=opts["eta"],
+            max_iter=opts["max_iter"],
+            comp_tol=opts["comp_tol"],
+            stagnation_iters=opts["stagnation_iters"],
+        )
         self.rho_0: float = opts["rho_0"]
         self.rho_max: float = opts["rho_max"]
         self.tau: float = opts["tau"]
@@ -175,6 +185,7 @@ class AugmentedLagrangianStrategy(BaseStrategy):
         self.comp_tol: float = opts["comp_tol"]
         self.dual_warmstart: bool = bool(opts["dual_warmstart"])
         self.stagnation_iters: int = int(opts["stagnation_iters"])
+        self._init_cleanup(opts)
 
     def solve(self) -> MPCCResult:
         p = self.problem
@@ -197,10 +208,11 @@ class AugmentedLagrangianStrategy(BaseStrategy):
             np.full(n_c, _INF),
         ])
 
+        cache = self._new_callback_cache()
+
         def constraints(x):
-            std_parts = self._eval_standard_con_values(x)
-            G = np.asarray(p.comp_G(x))
-            H = np.asarray(p.comp_H(x))
+            std_parts = self._eval_standard_con_values(x, cache)
+            G, H = self._eval_comp_values(x, cache)
             return np.concatenate([*std_parts, G, H])
 
         jac_structure = self._make_jac_structure([
@@ -217,9 +229,8 @@ class AugmentedLagrangianStrategy(BaseStrategy):
 
         if p.is_sparse:
             def jacobian(x):
-                std_flat = self._build_std_jac_flat(x)
-                v_G = np.asarray(p.comp_G_jacobian(x), dtype=float)
-                v_H = np.asarray(p.comp_H_jacobian(x), dtype=float)
+                std_flat = self._build_std_jac_flat(x, cache)
+                v_G, v_H = self._eval_comp_jac_raw(x, cache)
                 if v_G.ndim == 2:
                     v_G = v_G.ravel()
                 if v_H.ndim == 2:
@@ -227,8 +238,8 @@ class AugmentedLagrangianStrategy(BaseStrategy):
                 return np.concatenate([std_flat, v_G, v_H])
         else:
             def jacobian(x):
-                _, jac_rows = self._build_standard_constraints(x)
-                G, H, JG, JH = self._build_comp_jacobians(x)
+                _, jac_rows = self._build_standard_constraints(x, cache)
+                G, H, JG, JH = self._build_comp_jacobians(x, cache)
                 jac_rows.extend([JG, JH])
                 return np.vstack(jac_rows)
 
@@ -269,22 +280,19 @@ class AugmentedLagrangianStrategy(BaseStrategy):
 
         def obj_al(x):
             mu_k, rho_k = mu_ref[0], rho_ref[0]
-            G = np.asarray(p.comp_G(x))
-            H = np.asarray(p.comp_H(x))
+            G, H = self._eval_comp_values(x, cache)
             lam = np.maximum(0.0, mu_k + rho_k * G * H)
             penalty = (0.5 / rho_k) * np.sum(lam ** 2 - mu_k ** 2)
             return float(p.objective(x)) + penalty
 
         def grad_al(x):
             mu_k, rho_k = mu_ref[0], rho_ref[0]
-            G = np.asarray(p.comp_G(x))
-            H = np.asarray(p.comp_H(x))
+            G, H = self._eval_comp_values(x, cache)
             lam = np.maximum(0.0, mu_k + rho_k * G * H)   # (n_comp,)
 
             if union_maps is not None:
                 # Sparse path: scatter (lam*H)*JG + (lam*G)*JH into grad vector.
-                vG = np.asarray(p.comp_G_jacobian(x), dtype=float)
-                vH = np.asarray(p.comp_H_jacobian(x), dtype=float)
+                vG, vH = self._eval_comp_jac_raw(x, cache)
                 v_G = vG.ravel() if vG.ndim == 2 else vG
                 v_H = vH.ravel() if vH.ndim == 2 else vH
                 self._eval_weighted_union(
@@ -296,7 +304,7 @@ class AugmentedLagrangianStrategy(BaseStrategy):
                 d_al = _grad_scatter_buf
             else:
                 # Dense path: two BLAS DGEMV calls (no large intermediates).
-                _, _, JG, JH = self._build_comp_jacobians(x)
+                _, _, JG, JH = self._build_comp_jacobians(x, cache)
                 d_al = (lam * H) @ JG + (lam * G) @ JH
             return np.asarray(p.gradient(x)) + d_al
 
@@ -321,8 +329,7 @@ class AugmentedLagrangianStrategy(BaseStrategy):
         # Seed the adaptive inner tolerance from the complementarity residual
         # at x0.  If x0 is already complementary, fall back to 1.0 so the
         # first inner solve is still solved loosely.
-        _G0 = np.asarray(p.comp_G(x))
-        _H0 = np.asarray(p.comp_H(x))
+        _G0, _H0 = self._eval_comp_values(x, cache)
         _init_comp = max(float(np.max(np.abs(_G0 * _H0))), 1.0)
 
         for k in range(self.max_iter):
@@ -353,18 +360,18 @@ class AugmentedLagrangianStrategy(BaseStrategy):
                     "zu":       last_info["mult_x_U"],
                 }
 
-            G = np.asarray(p.comp_G(x))
-            H = np.asarray(p.comp_H(x))
+            G, H = self._eval_comp_values(x, cache)
             comp_residual = float(np.max(np.abs(G * H)))
             comp_residual_mean = float(np.mean(np.abs(G * H)))
 
             _off = n_g + n_h
             _lam_G = last_info["mult_g"][_off       : _off + n_c]
             _lam_H = last_info["mult_g"][_off + n_c : _off + 2 * n_c]
+            _mu_eff = np.maximum(0.0, mu_ref[0] + rho_ref[0] * G * H)
             _kkt = self._compute_kkt_iter(
                 x, last_info["mult_g"],
-                mpcc_mult_G=_lam_G + mu_ref[0] * H,
-                mpcc_mult_H=_lam_H + mu_ref[0] * G,
+                mpcc_mult_G=_lam_G + _mu_eff * H,
+                mpcc_mult_H=_lam_H + _mu_eff * G,
                 mult_x_L=last_info.get("mult_x_L"),
                 mult_x_U=last_info.get("mult_x_U"),
             )
@@ -384,7 +391,7 @@ class AugmentedLagrangianStrategy(BaseStrategy):
                 self.callback(len(history) - 1, history[-1])
 
             # Multiplier update: μ ← max(0, μ + ρ * G*H)
-            mu_ref[0] = np.maximum(0.0, mu_ref[0] + rho_ref[0] * G * H)
+            mu_ref[0] = _mu_eff
 
             # Penalty update: grow ρ if not making enough progress.
             _no_progress = comp_residual > self.eta * prev_comp_residual
@@ -405,8 +412,7 @@ class AugmentedLagrangianStrategy(BaseStrategy):
             if comp_residual < self.comp_tol:
                 break
 
-        G = np.asarray(p.comp_G(x))
-        H = np.asarray(p.comp_H(x))
+        G, H = self._eval_comp_values(x, cache)
 
         result = MPCCResult(
             x=x,
@@ -432,11 +438,14 @@ class AugmentedLagrangianStrategy(BaseStrategy):
         _off = n_g + n_h
         lam_G = last_info["mult_g"][_off       : _off + n_c]
         lam_H = last_info["mult_g"][_off + n_c : _off + 2 * n_c]
+        mpcc_mult_G = lam_G + mu_ref[0] * result.H
+        mpcc_mult_H = lam_H + mu_ref[0] * result.G
         result.kkt_residual = compute_kkt_residual(
             result, self.problem,
-            mpcc_mult_G=lam_G + mu_ref[0] * result.H,
-            mpcc_mult_H=lam_H + mu_ref[0] * result.G,
+            mpcc_mult_G=mpcc_mult_G,
+            mpcc_mult_H=mpcc_mult_H,
             mult_x_L=last_info.get("mult_x_L"),
             mult_x_U=last_info.get("mult_x_U"),
         )
+        result = self._maybe_run_cleanup(result, last_info, x, mpcc_mult_G, mpcc_mult_H)
         return result
