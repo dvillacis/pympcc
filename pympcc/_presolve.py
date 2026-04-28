@@ -647,7 +647,8 @@ def _fbbt(
         for kind, A, c in rows_iter:
             # Whole-row min/max for the infeasibility check.
             row_min, row_max = _row_min_max(A, skip=-1)
-            row_min += c; row_max += c
+            row_min += c
+            row_max += c
             if kind == 0 and np.isfinite(row_min) and row_min > _FBBT_TOL:
                 return xl, xu, True
             if kind == 1:
@@ -672,32 +673,38 @@ def _fbbt(
                         if aj > 0:
                             new_xu = ub_aj / aj
                             if new_xu < xu[j] - _FBBT_TOL and new_xu >= x0[j] - _FBBT_TOL:
-                                xu[j] = new_xu; moved = True
+                                xu[j] = new_xu
+                                moved = True
                         else:
                             new_xl = ub_aj / aj
                             if new_xl > xl[j] + _FBBT_TOL and new_xl <= x0[j] + _FBBT_TOL:
-                                xl[j] = new_xl; moved = True
+                                xl[j] = new_xl
+                                moved = True
                 else:  # equality
                     if np.isfinite(rest_min):
                         ub_aj = -rest_min
                         if aj > 0:
                             new_xu = ub_aj / aj
                             if new_xu < xu[j] - _FBBT_TOL and new_xu >= x0[j] - _FBBT_TOL:
-                                xu[j] = new_xu; moved = True
+                                xu[j] = new_xu
+                                moved = True
                         else:
                             new_xl = ub_aj / aj
                             if new_xl > xl[j] + _FBBT_TOL and new_xl <= x0[j] + _FBBT_TOL:
-                                xl[j] = new_xl; moved = True
+                                xl[j] = new_xl
+                                moved = True
                     if np.isfinite(rest_max):
                         lb_aj = -rest_max
                         if aj > 0:
                             new_xl = lb_aj / aj
                             if new_xl > xl[j] + _FBBT_TOL and new_xl <= x0[j] + _FBBT_TOL:
-                                xl[j] = new_xl; moved = True
+                                xl[j] = new_xl
+                                moved = True
                         else:
                             new_xu = lb_aj / aj
                             if new_xu < xu[j] - _FBBT_TOL and new_xu >= x0[j] - _FBBT_TOL:
-                                xu[j] = new_xu; moved = True
+                                xu[j] = new_xu
+                                moved = True
 
                 # Bound crossing → infeasibility (keep ε so we don't trip on roundoff).
                 if xl[j] > xu[j] + _FBBT_TOL:

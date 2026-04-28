@@ -24,8 +24,8 @@ Quickstart
 
 from ._autoscale import autoscale_comp_pairs
 from ._diagnostics import active_sets, classify_cq
-from ._sosc import sosc_check
 from ._presolve import PresolveMap, presolve
+from ._sosc import sosc_check
 from ._stationarity import (
     classify_stationarity,
     compute_kkt_residual,
@@ -60,4 +60,4 @@ __all__ = [
     "MultiStartResult",
     "TNLPResult",
 ]
-__version__ = "0.4.0"
+__version__ = "0.4.1"

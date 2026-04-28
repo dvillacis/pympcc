@@ -7,10 +7,10 @@ from typing import Callable, Literal, Optional, Union
 import numpy as np
 
 from ._autoscale import autoscale_comp_pairs as _autoscale_comp_pairs
-from ._kernels import HAS_NUMBA
 from ._diagnostics import classify_cq as _classify_cq
+from ._kernels import HAS_NUMBA
+from ._presolve import presolve as _presolve
 from ._sosc import sosc_check as _sosc_check
-from ._presolve import PresolveMap, presolve as _presolve
 from ._stationarity import verify_b_stationarity as _verify_b_stat
 from .models import StructuredMPCC
 from .problem import MPCCProblem

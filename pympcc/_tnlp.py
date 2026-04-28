@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
@@ -232,9 +232,10 @@ def run_tnlp_refinement(
     -------
     TNLPResult
     """
+    from types import SimpleNamespace
+
     from ._stationarity import compute_kkt_residual
     from .strategies._base import BaseStrategy
-    from types import SimpleNamespace
 
     p = problem
 

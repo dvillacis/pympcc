@@ -112,7 +112,6 @@ def run_benchmark(
             if verbose:
                 print(f"  {spec.name:<15} {strategy:<22} … ", end="", flush=True)
             t0 = time.perf_counter()
-            error: Optional[str] = None
             try:
                 # augmented_lagrangian uses comp_tol to drive the outer loop,
                 # which plays the role of epsilon for the other strategies.

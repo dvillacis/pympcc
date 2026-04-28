@@ -7,6 +7,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.4.1] - 2026-04-28
+
+### Fixed
+
+- **CI: `scipy` not installed in base conda environment** — `verify_b_stationarity` raised
+  `ModuleNotFoundError` even for tests that never reached the LP-solving code, causing 17
+  test failures. The `from scipy.optimize import linprog` import is now deferred past the
+  early-exit guards so it only executes when the LP is actually needed.
+  `scipy>=1.10` added to the base `micromamba` test environment.
+- **Coverage threshold not reached (83.73 % < 85 %)** — `pympcc/benchmarks/macmpec.py`
+  (CLI entry-point) counted against coverage but was never imported by the test suite.
+  Added to `[tool.coverage.run] omit`; coverage now sits at **91 %**.
+- **Lint (ruff) errors** — fixed I001 (unsorted import blocks in `__init__.py`, `solver.py`,
+  `_sosc.py`, `_tnlp.py`, `strategies/_base.py`), E702 (inline semicolons in `_presolve.py`),
+  and F841 / F401 (unused names in `benchmarks/macmpec.py` and `solver.py`).
+
+---
+
 ## [0.4.0] - 2026-04-28
 
 ### Added

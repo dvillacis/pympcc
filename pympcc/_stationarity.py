@@ -351,8 +351,6 @@ def verify_b_stationarity(
     to B-stationarity. This routine *directly* certifies B-stationarity
     without needing MPCC-LICQ to hold.
     """
-    from scipy.optimize import linprog
-
     p = problem
     n = p.n
 
@@ -423,6 +421,8 @@ def verify_b_stationarity(
         if lo > hi:
             lo = hi
         bounds.append((lo, hi))
+
+    from scipy.optimize import linprog  # noqa: PLC0415
 
     n_branches = 1 if n_bi == 0 else (1 << n_bi)
     min_descent = 0.0

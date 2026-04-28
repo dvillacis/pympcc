@@ -16,7 +16,6 @@ from .._stationarity import compute_kkt_residual as _compute_kkt_residual
 from ..problem import MPCCProblem
 from ..result import IPOPTStatus, IterationInfo, MPCCResult
 
-
 # Safeguard option defaults.  Merged into each ε-continuation strategy's
 # ``_DEFAULTS`` so that callers can pass these as ``strategy_options``.
 # Defaults preserve the previous (un-safeguarded) outer-loop behaviour.

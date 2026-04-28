@@ -28,7 +28,7 @@ from typing import Optional
 
 import numpy as np
 
-from ._diagnostics import active_sets, _stack_active_gradient_matrix, _matrix_rank
+from ._diagnostics import _stack_active_gradient_matrix, active_sets
 from ._stationarity import _dense_jac
 from .problem import MPCCProblem
 from .result import MPCCResult
