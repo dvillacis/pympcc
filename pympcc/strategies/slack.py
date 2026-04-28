@@ -382,7 +382,7 @@ class SlackStrategy(BaseStrategy):
             return float(p.objective(z[:n]))
 
         def grad_lifted(z: np.ndarray) -> np.ndarray:
-            g = np.asarray(p.gradient(z[:n]), dtype=float)  # type: ignore[operator]
+            g = np.asarray(p.gradient(z[:n]), dtype=float)  # type: ignore[misc, operator]
             return np.concatenate([g, np.zeros(2 * n_c)])
 
         hess_fn, hess_sparsity = None, None

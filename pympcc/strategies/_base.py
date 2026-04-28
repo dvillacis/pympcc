@@ -69,6 +69,14 @@ class BaseStrategy(ABC):
 
     name: str = "base"
 
+    # Declared here for type checking; set by iterative-continuation subclasses.
+    epsilon_0: float
+    epsilon_min: float
+    max_iter: int
+    dual_warmstart: bool
+    comp_tol: float | None
+    reduction: float
+
     def __init__(self, problem: MPCCProblem, ipopt_options: dict, *,
                  backend: str = "ipopt", solver_options: dict | None = None,
                  linear_solver_fn=None, **kwargs) -> None:
@@ -536,8 +544,8 @@ class BaseStrategy(ABC):
         self._ensure_cache_current(cache, x)
         if cache is not None and "comp_values" in cache:
             return cache["comp_values"]
-        G = np.asarray(p.comp_G(x))
-        H = np.asarray(p.comp_H(x))
+        G = np.asarray(p.comp_G(x))  # type: ignore[misc]
+        H = np.asarray(p.comp_H(x))  # type: ignore[misc]
         if p.comp_G_scale is not None:
             G = G * p.comp_G_scale
         if p.comp_H_scale is not None:
@@ -560,8 +568,8 @@ class BaseStrategy(ABC):
         self._ensure_cache_current(cache, x)
         if cache is not None and "comp_jac_raw" in cache:
             return cache["comp_jac_raw"]
-        vG = np.asarray(p.comp_G_jacobian(x), dtype=float)  # type: ignore[operator]
-        vH = np.asarray(p.comp_H_jacobian(x), dtype=float)  # type: ignore[operator]
+        vG = np.asarray(p.comp_G_jacobian(x), dtype=float)  # type: ignore[misc, operator]
+        vH = np.asarray(p.comp_H_jacobian(x), dtype=float)  # type: ignore[misc, operator]
         if p.comp_G_scale is not None:
             if vG.ndim == 2:
                 vG = vG * p.comp_G_scale[:, None]
@@ -1335,7 +1343,7 @@ class BaseStrategy(ABC):
             # at outer iter k but loop keeps shrinking ε for nothing"
             # pattern that wastes most of the wall time on poorly-scaled
             # large problems.
-            if plateau_on and prev_obj_acc is not None:
+            if plateau_on and prev_obj_acc is not None and prev_comp_acc is not None:
                 d_obj = (abs(info.obj - prev_obj_acc)
                          / max(abs(info.obj), 1e-12))
                 d_comp = (abs(info.comp_residual - prev_comp_acc)
@@ -1372,8 +1380,8 @@ class BaseStrategy(ABC):
     def _comp_residual(self, x: np.ndarray) -> float:
         """Complementarity infeasibility: max_i |G_i * H_i|."""
         p = self.problem
-        G = np.asarray(p.comp_G(x))
-        H = np.asarray(p.comp_H(x))
+        G = np.asarray(p.comp_G(x))  # type: ignore[misc]
+        H = np.asarray(p.comp_H(x))  # type: ignore[misc]
         return float(np.max(np.abs(G * H)))
 
     def _compute_kkt_iter(

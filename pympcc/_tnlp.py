@@ -355,7 +355,7 @@ def run_tnlp_refinement(
             success=True,
         )
         return compute_kkt_residual(
-            proxy, p,  # type: ignore[arg-type]
+            proxy, p,
             mpcc_mult_G=mG_orig,
             mpcc_mult_H=mH_orig,
             mult_x_L=info.get("mult_x_L"),

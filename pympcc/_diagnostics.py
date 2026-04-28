@@ -103,18 +103,18 @@ def _stack_active_gradient_matrix(
         cursor += mat.shape[0]
 
     if p.n_eq and p.eq_jacobian is not None:
-        Jh = _dense_jac(p.eq_jacobian(x), p.eq_jacobian_sparsity, p.n_eq, n)
+        Jh = _dense_jac(p.eq_jacobian(x), p.eq_jacobian_sparsity, p.n_eq, n)  # type: ignore[operator]
         _add("h", Jh)
     else:
         _add("h", np.zeros((0, n)))
 
-    JG = _dense_jac(p.comp_G_jacobian(x), p.comp_G_jacobian_sparsity, p.n_comp, n)
-    JH = _dense_jac(p.comp_H_jacobian(x), p.comp_H_jacobian_sparsity, p.n_comp, n)
+    JG = _dense_jac(p.comp_G_jacobian(x), p.comp_G_jacobian_sparsity, p.n_comp, n)  # type: ignore[misc, operator]
+    JH = _dense_jac(p.comp_H_jacobian(x), p.comp_H_jacobian_sparsity, p.n_comp, n)  # type: ignore[misc, operator]
     _add("G", JG[sets["I_G"]])
     _add("H", JH[sets["I_H"]])
 
     if p.n_ineq and p.ineq_jacobian is not None and sets["I_g"].size:
-        Jg = _dense_jac(p.ineq_jacobian(x), p.ineq_jacobian_sparsity, p.n_ineq, n)
+        Jg = _dense_jac(p.ineq_jacobian(x), p.ineq_jacobian_sparsity, p.n_ineq, n)  # type: ignore[operator]
         _add("g", Jg[sets["I_g"]])
     else:
         _add("g", np.zeros((0, n)))
@@ -182,14 +182,14 @@ def _mfcq_lp_feasible(
     # Equality block.
     A_eq_blocks: list[np.ndarray] = []
     if p.n_eq and p.eq_jacobian is not None:
-        Jh = _dense_jac(p.eq_jacobian(x), p.eq_jacobian_sparsity, p.n_eq, n)
+        Jh = _dense_jac(p.eq_jacobian(x), p.eq_jacobian_sparsity, p.n_eq, n)  # type: ignore[operator]
         A_eq_blocks.append(np.hstack([Jh, np.zeros((Jh.shape[0], 1))]))
     if sets["I_G"].size:
-        JG = _dense_jac(p.comp_G_jacobian(x), p.comp_G_jacobian_sparsity, p.n_comp, n)
+        JG = _dense_jac(p.comp_G_jacobian(x), p.comp_G_jacobian_sparsity, p.n_comp, n)  # type: ignore[misc, operator]
         A_eq_blocks.append(np.hstack([JG[sets["I_G"]],
                                       np.zeros((sets["I_G"].size, 1))]))
     if sets["I_H"].size:
-        JH = _dense_jac(p.comp_H_jacobian(x), p.comp_H_jacobian_sparsity, p.n_comp, n)
+        JH = _dense_jac(p.comp_H_jacobian(x), p.comp_H_jacobian_sparsity, p.n_comp, n)  # type: ignore[misc, operator]
         A_eq_blocks.append(np.hstack([JH[sets["I_H"]],
                                       np.zeros((sets["I_H"].size, 1))]))
     A_eq = np.vstack(A_eq_blocks) if A_eq_blocks else None
@@ -198,7 +198,7 @@ def _mfcq_lp_feasible(
     # Inequality block.
     A_ub_blocks: list[np.ndarray] = []
     if sets["I_g"].size and p.n_ineq and p.ineq_jacobian is not None:
-        Jg = _dense_jac(p.ineq_jacobian(x), p.ineq_jacobian_sparsity, p.n_ineq, n)
+        Jg = _dense_jac(p.ineq_jacobian(x), p.ineq_jacobian_sparsity, p.n_ineq, n)  # type: ignore[operator]
         Jg_act = Jg[sets["I_g"]]
         A_ub_blocks.append(np.hstack([Jg_act,
                                       np.ones((Jg_act.shape[0], 1))]))

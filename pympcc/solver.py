@@ -202,7 +202,7 @@ class MPCCSolver:
         if presolve:
             self.problem, self._presolve_map = _presolve(self.problem_orig)
         else:
-            self.problem, self._presolve_map = self.problem_orig, None
+            self.problem, self._presolve_map = self.problem_orig, None  # type: ignore[assignment]
         if autoscale:
             self._apply_autoscale()
         self.strategy_name = strategy
@@ -417,7 +417,7 @@ def solve(
     """
     if n_starts > 1:
         from .multistart import multistart as _multistart
-        return _multistart(
+        return _multistart(  # type: ignore[return-value]
             problem,
             n_starts=n_starts,
             perturb_scale=perturb_scale,

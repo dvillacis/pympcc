@@ -330,6 +330,7 @@ class MPCCProblem:
         var_idx_arr = np.array(var_idxs, dtype=np.intp)
 
         # Enforce lower bound >= 0 for each paired variable
+        assert self.xl is not None
         for vi in var_idxs:
             self.xl[vi] = max(self.xl[vi], 0.0)
 
@@ -395,25 +396,25 @@ class MPCCProblem:
                     "Pass derivatives='fd', derivatives='jax', or supply comp_H_jacobian explicitly."
                 )
 
-            def _G(x, _bG=base_G, _idx=var_idx_arr):
+            def _G(x, _bG=base_G, _idx=var_idx_arr):  # type: ignore[misc]
                 return np.concatenate([
                     np.asarray(_bG(x), dtype=float),
                     np.asarray(x, dtype=float)[_idx],
                 ])
 
-            def _H(x, _bH=base_H, _hfs=h_fns):
+            def _H(x, _bH=base_H, _hfs=h_fns):  # type: ignore[misc]
                 return np.concatenate([
                     np.asarray(_bH(x), dtype=float),
                     np.array([float(np.asarray(hf(x)).ravel()[0]) for hf in _hfs]),
                 ])
 
-            def _G_jac(x, _bJac=base_G_jac, _idx=var_idx_arr, _k=k, _n=n):
+            def _G_jac(x, _bJac=base_G_jac, _idx=var_idx_arr, _k=k, _n=n):  # type: ignore[misc]
                 base_rows = np.asarray(_bJac(x), dtype=float)
                 id_rows = np.zeros((_k, _n))
                 id_rows[np.arange(_k), _idx] = 1.0
                 return np.vstack([base_rows, id_rows])
 
-            def _H_jac(x, _bJac=base_H_jac, _jfs=resolved_h_jac):
+            def _H_jac(x, _bJac=base_H_jac, _jfs=resolved_h_jac):  # type: ignore[misc]
                 base_rows = np.asarray(_bJac(x), dtype=float)
                 extra_rows = np.stack([jf(x) for jf in _jfs], axis=0)
                 return np.vstack([base_rows, extra_rows])
@@ -602,14 +603,14 @@ class MPCCProblem:
 
         if not np.isfinite(self.objective(x0)):
             raise ValueError("objective(x0) returned non-finite value (NaN or Inf)")
-        if not np.all(np.isfinite(self.gradient(x0))):  # type: ignore[operator]
+        if not np.all(np.isfinite(self.gradient(x0))):  # type: ignore[misc, operator]
             raise ValueError("gradient(x0) returned non-finite values (NaN or Inf)")
 
-        self._check_shape("comp_G", self.comp_G, x0, (self.n_comp,))
+        self._check_shape("comp_G", self.comp_G, x0, (self.n_comp,))  # type: ignore[arg-type]
         if self.comp_G_jacobian_sparsity is None:
             self._check_shape("comp_G_jacobian", self.comp_G_jacobian, x0,  # type: ignore[arg-type]
                               (self.n_comp, self.n))
-        self._check_shape("comp_H", self.comp_H, x0, (self.n_comp,))
+        self._check_shape("comp_H", self.comp_H, x0, (self.n_comp,))  # type: ignore[arg-type]
         if self.comp_H_jacobian_sparsity is None:
             self._check_shape("comp_H_jacobian", self.comp_H_jacobian, x0,  # type: ignore[arg-type]
                               (self.n_comp, self.n))

@@ -121,7 +121,7 @@ def run_benchmark(
 
                 result = pympcc.solve(
                     spec.problem,
-                    strategy=strategy,
+                    strategy=strategy,  # type: ignore[arg-type]
                     ipopt_options=base_opts,
                     **extra,
                 )

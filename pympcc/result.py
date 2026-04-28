@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import numpy as np
 
@@ -142,7 +142,7 @@ class MPCCResult:
     mult_comp_H_mpcc: Optional[np.ndarray] = None
     # TNLP active-set refinement result (§2.6).  Populated when the solver is
     # called with ``tnlp_refine=True``.
-    tnlp_refined: Optional[object] = None  # TNLPResult, typed as object to avoid circular import
+    tnlp_refined: Optional[Any] = None  # TNLPResult, typed as Any to avoid circular import
     # MPCC second-order sufficient conditions (§2.3).  Populated when the
     # solver is invoked with ``diagnostics=True``.
     # ``True``  — reduced Hessian is PD on the critical cone.

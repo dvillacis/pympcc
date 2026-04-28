@@ -79,15 +79,15 @@ def _fd_lagrangian_hessian(
     n = p.n
 
     def grad_L(y: np.ndarray) -> np.ndarray:
-        g = np.asarray(p.gradient(y), dtype=float).copy()  # type: ignore[operator]
+        g = np.asarray(p.gradient(y), dtype=float).copy()  # type: ignore[misc, operator]
         if p.n_ineq > 0 and p.ineq_jacobian is not None and lam_g.size:
             Jg = _dense_jac(p.ineq_jacobian(y), p.ineq_jacobian_sparsity, p.n_ineq, n)  # type: ignore[operator]
             g += Jg.T @ lam_g
         if p.n_eq > 0 and p.eq_jacobian is not None and lam_h.size:
             Jh = _dense_jac(p.eq_jacobian(y), p.eq_jacobian_sparsity, p.n_eq, n)  # type: ignore[operator]
             g += Jh.T @ lam_h
-        JG = _dense_jac(p.comp_G_jacobian(y), p.comp_G_jacobian_sparsity, p.n_comp, n)  # type: ignore[operator]
-        JH = _dense_jac(p.comp_H_jacobian(y), p.comp_H_jacobian_sparsity, p.n_comp, n)  # type: ignore[operator]
+        JG = _dense_jac(p.comp_G_jacobian(y), p.comp_G_jacobian_sparsity, p.n_comp, n)  # type: ignore[misc, operator]
+        JH = _dense_jac(p.comp_H_jacobian(y), p.comp_H_jacobian_sparsity, p.n_comp, n)  # type: ignore[misc, operator]
         g += JG.T @ lam_G + JH.T @ lam_H
         return g
 

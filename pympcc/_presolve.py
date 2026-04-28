@@ -115,8 +115,8 @@ class PresolveMap:
 
         # G, H: re-evaluate on the original problem so values reflect the
         # original constraint, including pruned (constant-positive) pairs.
-        G_full = np.asarray(problem_orig.comp_G(x_full), dtype=float)
-        H_full = np.asarray(problem_orig.comp_H(x_full), dtype=float)
+        G_full = np.asarray(problem_orig.comp_G(x_full), dtype=float)  # type: ignore[misc]
+        H_full = np.asarray(problem_orig.comp_H(x_full), dtype=float)  # type: ignore[misc]
 
         # mult_g: layout is [ineq | eq | <comp blocks>], comp blocks each
         # of length ``n_comp_red``.  Rebuild with zeros at pruned ineq/eq
@@ -316,8 +316,8 @@ def _detect_empty_cols(
     x1 = np.clip(x0 + delta, xl, xu)
 
     try:
-        g0 = np.asarray(p.gradient(x0), dtype=float)
-        g1 = np.asarray(p.gradient(x1), dtype=float)
+        g0 = np.asarray(p.gradient(x0), dtype=float)  # type: ignore[misc, operator]
+        g1 = np.asarray(p.gradient(x1), dtype=float)  # type: ignore[misc, operator]
     except Exception:
         return np.empty(0, dtype=np.intp)
 
@@ -335,8 +335,8 @@ def _detect_dead(p: MPCCProblem) -> np.ndarray:
     if sG_sp is None and sH_sp is None:
         return dead  # no sparsity → no structural-zero detection
 
-    G_x0 = np.asarray(p.comp_G(p.x0), dtype=float)
-    H_x0 = np.asarray(p.comp_H(p.x0), dtype=float)
+    G_x0 = np.asarray(p.comp_G(p.x0), dtype=float)  # type: ignore[misc]
+    H_x0 = np.asarray(p.comp_H(p.x0), dtype=float)  # type: ignore[misc]
 
     if sG_sp is not None:
         rows_with_entry = np.unique(np.asarray(sG_sp[0]))
@@ -391,8 +391,8 @@ def _detect_forced(
     empty_G_set = set(int(i) for i in np.setdiff1d(np.arange(p.n_comp), with_entry_g))
     empty_H_set = set(int(i) for i in np.setdiff1d(np.arange(p.n_comp), with_entry_h))
 
-    G_x0 = np.asarray(p.comp_G(p.x0), dtype=float)
-    H_x0 = np.asarray(p.comp_H(p.x0), dtype=float)
+    G_x0 = np.asarray(p.comp_G(p.x0), dtype=float)  # type: ignore[misc]
+    H_x0 = np.asarray(p.comp_H(p.x0), dtype=float)  # type: ignore[misc]
 
     promote_G: list[int] = []
     promote_H: list[int] = []
@@ -759,9 +759,9 @@ def _build_reduced(
     x0_red = np.clip(x0_red, xl_red, xu_red)
 
     objective = lambda x: float(p.objective(lift_x(x)))                  # noqa: E731
-    gradient  = lambda x: np.asarray(p.gradient(lift_x(x)))[keep]        # noqa: E731
-    comp_G    = lambda x: np.asarray(p.comp_G(lift_x(x)))[kcomp]         # noqa: E731
-    comp_H    = lambda x: np.asarray(p.comp_H(lift_x(x)))[kcomp]         # noqa: E731
+    gradient  = lambda x: np.asarray(p.gradient(lift_x(x)))[keep]  # type: ignore[misc, operator]  # noqa: E731
+    comp_G    = lambda x: np.asarray(p.comp_G(lift_x(x)))[kcomp]  # type: ignore[misc]  # noqa: E731
+    comp_H    = lambda x: np.asarray(p.comp_H(lift_x(x)))[kcomp]  # type: ignore[misc]  # noqa: E731
 
     def reduce_jac(orig_jac, sparsity, row_remap, *, drop_empty_rows=False):
         """Reduce a Jacobian by dropping pruned rows and pinned cols.
@@ -840,7 +840,7 @@ def _build_reduced(
             drop_empty_rows=True,
         )
         if surviving_ineq is None:
-            ineq_fn = lambda x: np.asarray(p.ineq_constraints(lift_x(x)))    # noqa: E731
+            ineq_fn = lambda x: np.asarray(p.ineq_constraints(lift_x(x)))  # type: ignore[misc]  # noqa: E731
             n_ineq_red = p.n_ineq
         else:
             sel = surviving_ineq
@@ -848,7 +848,7 @@ def _build_reduced(
             if n_ineq_red == 0:
                 ineq_fn, iJ_jac, iJ_sp = None, None, None
             else:
-                ineq_fn = lambda x: np.asarray(p.ineq_constraints(lift_x(x)))[sel]  # noqa: E731
+                ineq_fn = lambda x: np.asarray(p.ineq_constraints(lift_x(x)))[sel]  # type: ignore[misc]  # noqa: E731
     else:
         ineq_fn, iJ_jac, iJ_sp, n_ineq_red = None, None, None, 0
 
@@ -858,10 +858,10 @@ def _build_reduced(
     n_promote_G = pmap.promote_G.size
     n_promote_H = pmap.promote_H.size
     if n_promote_G or n_promote_H:
-        sG_full_rows = np.asarray(p.comp_G_jacobian_sparsity[0], dtype=np.intp)
-        sG_full_cols = np.asarray(p.comp_G_jacobian_sparsity[1], dtype=np.intp)
-        sH_full_rows = np.asarray(p.comp_H_jacobian_sparsity[0], dtype=np.intp)
-        sH_full_cols = np.asarray(p.comp_H_jacobian_sparsity[1], dtype=np.intp)
+        sG_full_rows = np.asarray(p.comp_G_jacobian_sparsity[0], dtype=np.intp)  # type: ignore[index]
+        sG_full_cols = np.asarray(p.comp_G_jacobian_sparsity[1], dtype=np.intp)  # type: ignore[index]
+        sH_full_rows = np.asarray(p.comp_H_jacobian_sparsity[0], dtype=np.intp)  # type: ignore[index]
+        sH_full_cols = np.asarray(p.comp_H_jacobian_sparsity[1], dtype=np.intp)  # type: ignore[index]
 
         pos_G = -np.ones(n_comp_orig, dtype=np.intp)
         pos_G[pmap.promote_G] = np.arange(n_promote_G)
@@ -947,7 +947,7 @@ def _build_reduced(
             drop_empty_rows=True,
         )
         if surviving_eq is None:
-            eq_fn = lambda x: np.asarray(p.eq_constraints(lift_x(x)))        # noqa: E731
+            eq_fn = lambda x: np.asarray(p.eq_constraints(lift_x(x)))  # type: ignore[misc]  # noqa: E731
             n_eq_red = p.n_eq
         else:
             sel_eq = surviving_eq
@@ -955,7 +955,7 @@ def _build_reduced(
             if n_eq_red == 0:
                 eq_fn, eJ_jac, eJ_sp = None, None, None
             else:
-                eq_fn = lambda x: np.asarray(p.eq_constraints(lift_x(x)))[sel_eq]  # noqa: E731
+                eq_fn = lambda x: np.asarray(p.eq_constraints(lift_x(x)))[sel_eq]  # type: ignore[misc]  # noqa: E731
     else:
         eq_fn, eJ_jac, eJ_sp, n_eq_red = None, None, None, 0
 
@@ -965,10 +965,10 @@ def _build_reduced(
     n_prefix_H = pmap.prefix_H_eq.size  # G_i > 0 → H_i = 0
     n_prefix_G = pmap.prefix_G_eq.size  # H_i > 0 → G_i = 0
     if n_prefix_H or n_prefix_G:
-        sG_full_rows = np.asarray(p.comp_G_jacobian_sparsity[0], dtype=np.intp)
-        sG_full_cols = np.asarray(p.comp_G_jacobian_sparsity[1], dtype=np.intp)
-        sH_full_rows = np.asarray(p.comp_H_jacobian_sparsity[0], dtype=np.intp)
-        sH_full_cols = np.asarray(p.comp_H_jacobian_sparsity[1], dtype=np.intp)
+        sG_full_rows = np.asarray(p.comp_G_jacobian_sparsity[0], dtype=np.intp)  # type: ignore[index]
+        sG_full_cols = np.asarray(p.comp_G_jacobian_sparsity[1], dtype=np.intp)  # type: ignore[index]
+        sH_full_rows = np.asarray(p.comp_H_jacobian_sparsity[0], dtype=np.intp)  # type: ignore[index]
+        sH_full_cols = np.asarray(p.comp_H_jacobian_sparsity[1], dtype=np.intp)  # type: ignore[index]
 
         pos_pH = -np.ones(n_comp_orig, dtype=np.intp)
         pos_pH[pmap.prefix_H_eq] = np.arange(n_prefix_H)  # H_i row offsets

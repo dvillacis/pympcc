@@ -258,7 +258,7 @@ def compute_kkt_residual(
     x = result.x
     n_g, n_h = p.n_ineq, p.n_eq
 
-    r = np.asarray(p.gradient(x), dtype=float).copy()  # type: ignore[operator]
+    r = np.asarray(p.gradient(x), dtype=float).copy()  # type: ignore[misc, operator]
     if mult_x_L is not None:
         r -= mult_x_L[:p.n]
     if mult_x_U is not None:
@@ -269,8 +269,8 @@ def compute_kkt_residual(
     if n_h:
         r += _jac_T_vec(p.eq_jacobian(x), p.eq_jacobian_sparsity, n_h, p.n, result.mult_g[n_g : n_g + n_h])  # type: ignore[misc, operator]
 
-    r += _jac_T_vec(p.comp_G_jacobian(x), p.comp_G_jacobian_sparsity, p.n_comp, p.n, mpcc_mult_G)  # type: ignore[operator]
-    r += _jac_T_vec(p.comp_H_jacobian(x), p.comp_H_jacobian_sparsity, p.n_comp, p.n, mpcc_mult_H)  # type: ignore[operator]
+    r += _jac_T_vec(p.comp_G_jacobian(x), p.comp_G_jacobian_sparsity, p.n_comp, p.n, mpcc_mult_G)  # type: ignore[misc, operator]
+    r += _jac_T_vec(p.comp_H_jacobian(x), p.comp_H_jacobian_sparsity, p.n_comp, p.n, mpcc_mult_H)  # type: ignore[misc, operator]
 
     return float(np.max(np.abs(r)))
 
@@ -383,10 +383,10 @@ def verify_b_stationarity(
         }
 
     x = np.asarray(result.x, dtype=float)
-    grad = np.asarray(p.gradient(x), dtype=float)  # type: ignore[operator]
+    grad = np.asarray(p.gradient(x), dtype=float)  # type: ignore[misc, operator]
 
-    JG = _dense_jac(p.comp_G_jacobian(x), p.comp_G_jacobian_sparsity, p.n_comp, n)  # type: ignore[operator]
-    JH = _dense_jac(p.comp_H_jacobian(x), p.comp_H_jacobian_sparsity, p.n_comp, n)  # type: ignore[operator]
+    JG = _dense_jac(p.comp_G_jacobian(x), p.comp_G_jacobian_sparsity, p.n_comp, n)  # type: ignore[misc, operator]
+    JH = _dense_jac(p.comp_H_jacobian(x), p.comp_H_jacobian_sparsity, p.n_comp, n)  # type: ignore[misc, operator]
 
     A_eq_base: list = []
     A_ub_base: list = []
