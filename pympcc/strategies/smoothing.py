@@ -138,7 +138,7 @@ class SmoothingStrategy(BaseStrategy):
         self.dual_warmstart: bool = bool(opts["dual_warmstart"])
         self.comp_tol: float | None = opts["comp_tol"]
         self._init_safeguards(opts)
-        self._init_cleanup(opts)
+        self._init_cleanup(opts, user_kwargs=kwargs)
 
     # ------------------------------------------------------------------ #
     # Fischer-Burmeister functions                                         #

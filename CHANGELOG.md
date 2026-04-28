@@ -7,6 +7,96 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.4.0] - 2026-04-28
+
+### Added
+
+**Variable-paired complementarity — MCP form (`comp_var_pairs`)**
+- New `MPCCProblem.comp_var_pairs` field: list of `(var_idx, h_fn)` or
+  `(var_idx, h_fn, h_jac_fn)` tuples declaring `x[var_idx] ≥ 0 ⊥ h_fn(x) ≥ 0`
+  without writing `comp_G(x) = x[var_idxs]` manually
+- Two modes: *all-var-pairs* (`comp_G=None`, every pair from `comp_var_pairs`); *mixed*
+  (`comp_G` supplies the first `n_comp − k` pairs, `comp_var_pairs` appends `k` more)
+- G-side Jacobian rows are always exact (identity); H-side rows use `h_jac_fn` when
+  provided, otherwise forward finite differences per row
+- `xl[var_idx]` is silently clamped to `max(xl[var_idx], 0.0)`
+- Fully composable with `derivatives="fd"` / `derivatives="jax"` and all six strategies
+- Module: `pympcc/problem.py` — `_normalize_var_pairs()` method
+- Tests: `tests/test_mcp_var_pairs.py` (21 cases)
+
+**`derivatives` shorthand on `MPCCProblem`**
+- `derivatives="fd"` or `derivatives="jax"` fills every unset derivative field
+  (`gradient`, `comp_G_jacobian`, `comp_H_jacobian`, `ineq_jacobian`, `eq_jacobian`)
+  with the corresponding sentinel at once — replaces setting each individually
+
+**MPCC-SOSC: second-order sufficient conditions (`sosc_check`)**
+- `pympcc.sosc_check(result, problem)` checks that the reduced Lagrangian Hessian
+  is positive definite on the MPCC critical cone — certifying `x*` as a strict local minimiser
+- Algorithm: build active-constraint gradient matrix A → null-space basis Z via SVD →
+  reduced Hessian W = Z^T H Z → min eigenvalue test
+- Hessian source (priority): `MPCCProblem.lagrangian_hessian` (user-supplied) →
+  central FD of ∇_x L using TNLP-refined multipliers (best) or zero multipliers (conservative)
+- Returns `{"sosc": bool|None, "min_eigenvalue": float|None, "null_space_dim", "n_active", "skipped_reason"}`
+- Biactive pairs (`I_00 ≠ ∅`) → `sosc=None, skipped_reason="biactive_pairs"`
+- Non-converged result → `sosc=None, skipped_reason="not_converged"`
+- Three new `MPCCResult` fields: `sosc`, `sosc_min_eigenvalue`, `sosc_skipped_reason`
+- Wired into `MPCCSolver._attach_diagnostics` (runs when `diagnostics=True`)
+- Exported at top-level: `pympcc.sosc_check`
+- Module: `pympcc/_sosc.py`
+- Tests: `tests/test_sosc.py` (16 cases)
+
+**TNLP active-set refinement — certified MPCC multipliers (`tnlp_refine=True`)**
+- `solve(problem, tnlp_refine=True)` re-solves a tightened NLP with the active set
+  `(I_G, I_H)` fixed as equality constraints; extracts clean MPCC multipliers μ_G, μ_H
+- Stationarity upgrade: result labelled `"S-stationary"` when all multipliers ≥ −tol,
+  `"W-stationary"` when any are negative (previously `"not S-stationary"`)
+- Flip-and-retry guard: if the initial TNLP finds W-stationary and ≤ 20 % of pairs had
+  the wrong side pinned, swaps those pairs and re-solves once
+- Biactivity pre-screen: skips the TNLP when more than 10 % of pairs are biactive
+  (`G_i ≤ bi_tol` and `H_i ≤ bi_tol`), avoiding restoration failures on degenerate iterates
+- New `MPCCResult` fields: `mult_comp_G_mpcc`, `mult_comp_H_mpcc`, `tnlp_refined` (`TNLPResult`)
+- `TNLPResult` dataclass: `x`, `obj`, `status`, `message`, `success`, `mult_comp_G`,
+  `mult_comp_H`, `mult_ineq`, `mult_eq`, `kkt_residual`, `stationarity`, `n_iter`,
+  `solve_time`, `active_set`, `n_violations`
+- Module: `pympcc/_tnlp.py`
+- Tests: `tests/test_tnlp.py`
+
+**Per-pair status and structured result export**
+- `result.per_pair_status` — always populated after every solve; each entry is one of
+  `"G_active"` (G_i≈0, H_i>0), `"H_active"`, `"biactive"`, or `"inactive"`
+  using adaptive threshold `max(sqrt(comp_residual), 1e-6)`
+- `result.to_json()` — serialises the full result to a JSON string (arrays as lists,
+  `None` as JSON null, history omitted)
+- `result.to_dataframe()` — returns a per-pair `pandas.DataFrame` with columns
+  `pair`, `G`, `H`, `GH`, `status`, and (when TNLP refined) `mu_G`, `mu_H`
+- Tests: `tests/test_per_pair_status.py` (20 cases), `tests/test_summary.py` (19 cases)
+
+**MacMPEC benchmark runner (`pympcc.benchmarks`)**
+- `pympcc.benchmarks.run_benchmark(problems, strategies, ...)` runs any subset of the
+  13-problem suite and returns a list of `BenchmarkResult` dataclasses
+- `print_table(results)` — Leyffer-style fixed-width results table
+- `save_csv(results, path)` — CSV export
+- CLI: `python -m pympcc.benchmarks.macmpec [--strategy ...] [--problems ...] [--out file.csv] [--quiet]`
+- Problem registry moved to `pympcc/benchmarks/_problems.py`; `tests/macmpec_problems.py`
+  is now a thin re-export shim
+- Module: `pympcc/benchmarks/` (`__init__.py`, `_problems.py`, `macmpec.py`)
+
+### Fixed
+
+- CI badge URL in README corrected (`davidvillacis` → `dvillacis`)
+- Repository, Bug Tracker, and Changelog URLs in `pyproject.toml` corrected
+  (`davidvillacis` → `dvillacis`)
+
+### Tests
+
+- 814 passed, 6 skipped, 54 xfailed (was 635 in 0.3.0)
+- New: `test_sosc.py`, `test_tnlp.py`, `test_mcp_var_pairs.py`,
+  `test_per_pair_status.py`, `test_summary.py`, `test_multistart.py`,
+  `test_autoscale.py`, `test_cleanup_hessian.py`, `test_derivatives_default.py`,
+  `test_matched_tol.py`, `test_safeguard_plateau_blowup.py`, `test_tnlp.py`
+
+---
+
 ## [0.3.0] - 2026-04-26
 
 ### Added

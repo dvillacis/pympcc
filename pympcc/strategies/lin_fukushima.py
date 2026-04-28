@@ -80,6 +80,32 @@ class LinFukushimaStrategy(BaseStrategy):
 
         return jax_hessian_lagrangian(lagrangian, p.n, p.x0, m, p.jax_sparsity_tol)
 
+    def _build_cleanup_hessian(self):
+        """Reuse the strategy Lagrangian Hessian for the cleanup NLP when a
+        manual Hessian is supplied; otherwise defer to the base-class
+        JAX cleanup-Hessian builder.
+
+        Cleanup layout is ``[g, h, G, H]`` (size ``n_g + n_h + 2·n_c``);
+        Lin-Fukushima layout is ``[g, h, G, H, G·H, G+H]`` (size
+        ``n_g + n_h + 4·n_c``).  Setting ``λ_{G·H} = λ_{G+H} = 0`` —
+        i.e. padding ``lam_cu`` with ``2·n_c`` zeros — recovers the
+        cleanup Lagrangian, so we wrap the user's manual Hessian
+        without rebuilding anything.
+        """
+        if not self._has_manual_hessian():
+            return super()._build_cleanup_hessian()
+
+        p = self.problem
+        base_hess = p.lagrangian_hessian
+        base_sp = p.lagrangian_hessian_sparsity
+        pad = 2 * p.n_comp
+
+        def cleanup_hess(x, lam_cu, obj_factor, _base=base_hess, _pad=pad):
+            lam_full = np.concatenate([np.asarray(lam_cu), np.zeros(_pad)])
+            return _base(x, lam_full, obj_factor)
+
+        return cleanup_hess, base_sp
+
     def __init__(self, problem, ipopt_options: dict, **kwargs) -> None:
         super().__init__(problem, ipopt_options,
                          backend=kwargs.pop("backend", "ipopt"),
@@ -101,7 +127,7 @@ class LinFukushimaStrategy(BaseStrategy):
         self.dual_warmstart: bool = bool(opts["dual_warmstart"])
         self.comp_tol: float | None = opts["comp_tol"]
         self._init_safeguards(opts)
-        self._init_cleanup(opts)
+        self._init_cleanup(opts, user_kwargs=kwargs)
 
     def solve(self) -> MPCCResult:
         p = self.problem

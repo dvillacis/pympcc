@@ -38,17 +38,25 @@ CLEANUP_DEFAULTS: dict = dict(
 
 
 SAFEGUARD_DEFAULTS: dict = dict(
-    safeguards=None,                # "all" turns on all four safeguards at once
+    safeguards=None,                # "all" turns on all five safeguards at once
     safeguard_rollback=False,       # snapshot/rollback when inner solve misbehaves
     safeguard_adaptive_eps=False,   # cautious ε reduction when last solve was loose
     safeguard_kkt_termination=False,  # break early on small MPCC-KKT residual
+    safeguard_plateau=False,        # break early when (obj, comp) stop improving
     kkt_tol=1e-6,                   # threshold for safeguard_kkt_termination
-    inner_tol_mode="linear",        # "linear" (current) or "quadratic" (Leyffer)
+    inner_tol_mode="linear",        # "linear" | "quadratic" (Leyffer) | "matched"
+    inner_tol_factor=0.1,           # ``matched`` mode: tol = factor · ε
+    inner_tol_floor=1e-10,          # ``matched`` mode: hard floor on tol
     comp_eps_ratio_theta=10.0,      # "tracked ε" means comp ≤ θ·ε
     rollback_lambda_jump=1e3,       # reject if ‖mult_g‖∞ jumps more than this
     rollback_max_count=3,           # abort after this many consecutive rollbacks
     eps_hold_factor=3.0,            # ε multiplier on rollback (>1 backs off toward last good ε; capped at last_good_eps)
     restoration_iter_threshold=5,   # rollback if IPOPT spent ≥ this many iters in restoration
+    pre_post_blowup_factor=10.0,    # rollback if post-NLP comp residual > factor × pre-NLP comp residual
+    plateau_tol_obj=1e-4,           # relative |Δobj| below this counts as plateau
+    plateau_tol_comp=1e-3,          # relative |Δcomp_residual| below this counts as plateau
+    plateau_window=2,               # consecutive plateau iters required to terminate
+    plateau_comp_target=1e-4,       # plateau breaks only fire when comp_residual ≤ this
 )
 
 
@@ -233,7 +241,7 @@ class BaseStrategy(ABC):
         problem,
         *,
         theta: float = 1.0,
-        lo: float = 1e-1,
+        lo: float = 1e-3,
         hi: float = 1.0,
     ) -> tuple[float, float]:
         """Pick ``ε₀ = clip(theta * max|G(x₀)·H(x₀)|, lo, hi)``.
@@ -300,17 +308,25 @@ class BaseStrategy(ABC):
         if comp_tol is not None and comp_tol <= 0.0:
             raise ValueError("comp_tol must be > 0 when provided")
 
-    def _init_cleanup(self, opts: dict) -> None:
+    def _init_cleanup(self, opts: dict, user_kwargs: dict | None = None) -> None:
         """Install active-set cleanup attributes on ``self``.
 
         Strategies built on :meth:`_run_epsilon_continuation` call this once
         after ``_init_safeguards``.  The meta key ``opts["safeguards"] ==
-        "all"`` also flips ``cleanup`` to ``"auto"`` when it is otherwise
-        unset, so that ``--safeguards`` becomes the single switch users
-        flip to opt into both the continuation guards and the polish phase.
+        "all"`` also flips ``cleanup`` to ``"auto"`` when the user has *not*
+        explicitly supplied a ``cleanup`` value, so that ``--safeguards``
+        becomes the single switch to opt into both the continuation guards
+        and the polish phase.  Passing ``cleanup=False`` explicitly always
+        suppresses cleanup regardless of ``safeguards``.
+
+        *user_kwargs* is the raw ``**kwargs`` dict before merging with
+        defaults; it is used to detect whether the caller explicitly set
+        ``cleanup``.  When omitted (legacy callers) the old behaviour is
+        preserved.
         """
         cleanup_raw = opts.get("cleanup", False)
-        if opts.get("safeguards") == "all" and cleanup_raw is False:
+        user_set_cleanup = user_kwargs is not None and "cleanup" in user_kwargs
+        if opts.get("safeguards") == "all" and not user_set_cleanup and cleanup_raw is False:
             cleanup_raw = "auto"
         if cleanup_raw not in (False, True, "auto"):
             raise ValueError(
@@ -360,12 +376,14 @@ class BaseStrategy(ABC):
         rb_on  = bool(opts.get("safeguard_rollback", False))         or all_on
         ad_on  = bool(opts.get("safeguard_adaptive_eps", False))      or all_on
         kk_on  = bool(opts.get("safeguard_kkt_termination", False))   or all_on
+        pl_on  = bool(opts.get("safeguard_plateau", False))           or all_on
         mode   = opts.get("inner_tol_mode", "linear")
         if all_on and mode == "linear":
             mode = "quadratic"
-        if mode not in ("linear", "quadratic"):
+        if mode not in ("linear", "quadratic", "matched"):
             raise ValueError(
-                f"inner_tol_mode must be 'linear' or 'quadratic', got {mode!r}"
+                "inner_tol_mode must be 'linear', 'quadratic', or 'matched',"
+                f" got {mode!r}"
             )
 
         theta    = float(opts.get("comp_eps_ratio_theta", 10.0))
@@ -374,6 +392,13 @@ class BaseStrategy(ABC):
         eps_hold = float(opts.get("eps_hold_factor", 1.0))
         kkt_tol  = float(opts.get("kkt_tol", 1e-6))
         rest_th  = int(opts.get("restoration_iter_threshold", 5))
+        blowup   = float(opts.get("pre_post_blowup_factor", 10.0))
+        tol_fac  = float(opts.get("inner_tol_factor", 0.1))
+        tol_floor = float(opts.get("inner_tol_floor", 1e-10))
+        pl_tobj  = float(opts.get("plateau_tol_obj", 1e-4))
+        pl_tcomp = float(opts.get("plateau_tol_comp", 1e-3))
+        pl_win   = int(opts.get("plateau_window", 2))
+        pl_targ  = float(opts.get("plateau_comp_target", 1e-4))
 
         if theta <= 0.0:
             raise ValueError("comp_eps_ratio_theta must be > 0")
@@ -387,10 +412,25 @@ class BaseStrategy(ABC):
             raise ValueError("kkt_tol must be > 0")
         if rest_th < 1:
             raise ValueError("restoration_iter_threshold must be >= 1")
+        if blowup <= 1.0:
+            raise ValueError("pre_post_blowup_factor must be > 1")
+        if tol_fac <= 0.0:
+            raise ValueError("inner_tol_factor must be > 0")
+        if tol_floor <= 0.0:
+            raise ValueError("inner_tol_floor must be > 0")
+        if pl_tobj <= 0.0:
+            raise ValueError("plateau_tol_obj must be > 0")
+        if pl_tcomp <= 0.0:
+            raise ValueError("plateau_tol_comp must be > 0")
+        if pl_win < 1:
+            raise ValueError("plateau_window must be >= 1")
+        if pl_targ <= 0.0:
+            raise ValueError("plateau_comp_target must be > 0")
 
         self.safeguard_rollback         = rb_on
         self.safeguard_adaptive_eps     = ad_on
         self.safeguard_kkt_termination  = kk_on
+        self.safeguard_plateau          = pl_on
         self.kkt_tol                    = kkt_tol
         self.inner_tol_mode             = mode
         self.comp_eps_ratio_theta       = theta
@@ -398,6 +438,13 @@ class BaseStrategy(ABC):
         self.rollback_max_count         = rb_cap
         self.eps_hold_factor            = eps_hold
         self.restoration_iter_threshold = rest_th
+        self.pre_post_blowup_factor     = blowup
+        self.inner_tol_factor           = tol_fac
+        self.inner_tol_floor            = tol_floor
+        self.plateau_tol_obj            = pl_tobj
+        self.plateau_tol_comp           = pl_tcomp
+        self.plateau_window             = pl_win
+        self.plateau_comp_target        = pl_targ
 
     @staticmethod
     def _validate_augmented_lagrangian_options(
@@ -889,19 +936,78 @@ class BaseStrategy(ABC):
                 jac_rows.extend([JG, JH])
                 return np.vstack(jac_rows)
 
+        hess_fn, hess_sp = self._build_cleanup_hessian()
         nlp = self._build_nlp(cl, cu, constraints, jacobian, jac_structure,
-                              hess_fn=None, hess_sparsity=None)
-        nlp.add_option("hessian_approximation", "limited-memory")
+                              hess_fn=hess_fn, hess_sparsity=hess_sp)
+        if hess_fn is None:
+            # No exact Hessian available for this strategy — fall back to L-BFGS
+            # and floor the inherited tol at 1e-6 to avoid IPOPT spinning on
+            # quasi-Newton dual residuals it can't drive below the analytical
+            # tolerance.
+            nlp.add_option("hessian_approximation", "limited-memory")
+            cu_tol_floor = 1e-6
+        else:
+            cu_tol_floor = 0.0
         nlp.add_option("max_iter", int(self.cleanup_max_iter))
         if self.cleanup_tol is not None:
             cu_tol = float(self.cleanup_tol)
         else:
-            # L-BFGS on the cleanup NLP rarely matches an analytical-Hessian
-            # tolerance, so floor the inherited tol at 1e-6 to avoid IPOPT
-            # spinning to MAX_ITER on inconsequential dual residuals.
-            cu_tol = max(float(self.ipopt_options.get("tol", 1e-8)), 1e-6)
+            cu_tol = max(float(self.ipopt_options.get("tol", 1e-8)),
+                         cu_tol_floor)
         nlp.add_option("tol", cu_tol)
         return nlp, cache
+
+    def _build_cleanup_hessian(self):
+        """Return ``(hess_fn, hess_sparsity)`` for the cleanup NLP, or
+        ``(None, None)`` to use L-BFGS.
+
+        The cleanup constraint layout is ``[g, h, G, H]`` (size
+        ``n_g + n_h + 2·n_c``), so ``hess_fn(x, lam_cu, obj_factor)`` must
+        accept multipliers in that layout.  The cleanup Lagrangian is
+        the same across every strategy::
+
+            L_cu = obj_factor·f + λ_g·g + λ_h·h + λ_G·G + λ_H·H
+
+        so the universal default builds it via JAX autodiff whenever
+        ``problem.use_jax_hessian`` is set; otherwise returns
+        ``(None, None)``.  Strategies whose full Lagrangian is a strict
+        superset of ``L_cu`` (Scholtes, lin_fukushima) override to wrap
+        their existing Hessian with zero-padded multipliers — cheaper
+        than a second JAX compile when a manual Hessian is supplied.
+        """
+        if not self._has_jax_hessian():
+            return None, None
+        return self._build_jax_cleanup_hessian()
+
+    def _build_jax_cleanup_hessian(self):  # pragma: no cover
+        """Build the cleanup Lagrangian Hessian via JAX (universal).
+
+        Used by every strategy whose full Lagrangian is *not* a strict
+        superset of ``L_cu`` (smoothing, slack, augmented_lagrangian),
+        and as the JAX fallback for Scholtes/lin_fukushima when no
+        manual Hessian is supplied.
+        """
+        import jax.numpy as jnp
+
+        from .._jax import jax_hessian_lagrangian
+        p = self.problem
+        n_g, n_h, n_c = p.n_ineq, p.n_eq, p.n_comp
+        m_cu = n_g + n_h + 2 * n_c  # cleanup layout: [g, h, G, H]
+
+        def lagrangian_cu(x, lam, obj_factor):
+            val = obj_factor * p.objective(x)
+            if n_g:
+                val = val + jnp.dot(lam[:n_g], p.ineq_constraints(x))
+            if n_h:
+                val = val + jnp.dot(lam[n_g:n_g + n_h], p.eq_constraints(x))
+            off = n_g + n_h
+            val = val + jnp.dot(lam[off:off + n_c], p.comp_G(x))
+            val = val + jnp.dot(lam[off + n_c:off + 2 * n_c], p.comp_H(x))
+            return val
+
+        return jax_hessian_lagrangian(
+            lagrangian_cu, p.n, p.x0, m_cu, p.jax_sparsity_tol,
+        )
 
     def _maybe_run_cleanup(
         self,
@@ -1000,10 +1106,15 @@ class BaseStrategy(ABC):
         if mult_g is not None:
             lam_G = mult_g[n_g + n_h           : n_g + n_h + n_c]
             lam_H = mult_g[n_g + n_h + n_c     : n_g + n_h + 2 * n_c]
+            # Cleanup uses scaled constraints (s_G·G, s_H·H) via
+            # _eval_comp_values.  Scale multipliers to original problem space
+            # so compute_kkt_residual (which uses unscaled Jacobians) is correct.
+            mu_G_orig = lam_G * np.asarray(p.comp_G_scale) if p.comp_G_scale is not None else lam_G
+            mu_H_orig = lam_H * np.asarray(p.comp_H_scale) if p.comp_H_scale is not None else lam_H
             result.kkt_residual = compute_kkt_residual(
                 result, p,
-                mpcc_mult_G=lam_G,
-                mpcc_mult_H=lam_H,
+                mpcc_mult_G=mu_G_orig,
+                mpcc_mult_H=mu_H_orig,
                 mult_x_L=info_cu.get("mult_x_L"),
                 mult_x_U=info_cu.get("mult_x_U"),
             )
@@ -1056,6 +1167,7 @@ class BaseStrategy(ABC):
         rollback_on    = getattr(self, "safeguard_rollback", False)
         adaptive_on    = getattr(self, "safeguard_adaptive_eps", False)
         kkt_term_on    = getattr(self, "safeguard_kkt_termination", False)
+        plateau_on     = getattr(self, "safeguard_plateau", False)
         kkt_tol        = getattr(self, "kkt_tol", 1e-6)
         tol_mode       = getattr(self, "inner_tol_mode", "linear")
         theta          = getattr(self, "comp_eps_ratio_theta", 10.0)
@@ -1063,6 +1175,13 @@ class BaseStrategy(ABC):
         rollback_cap   = getattr(self, "rollback_max_count", 3)
         eps_hold       = getattr(self, "eps_hold_factor", 1.0)
         rest_threshold = getattr(self, "restoration_iter_threshold", 5)
+        blowup_factor  = getattr(self, "pre_post_blowup_factor", 10.0)
+        tol_factor     = getattr(self, "inner_tol_factor", 0.1)
+        tol_floor      = getattr(self, "inner_tol_floor", 1e-10)
+        plateau_tol_obj  = getattr(self, "plateau_tol_obj", 1e-4)
+        plateau_tol_comp = getattr(self, "plateau_tol_comp", 1e-3)
+        plateau_window   = getattr(self, "plateau_window", 2)
+        plateau_target   = getattr(self, "plateau_comp_target", 1e-4)
 
         user_tol      = self.ipopt_options.get("tol", 1e-8)
         inner_max_iter = int(self.ipopt_options.get("max_iter", 3000))
@@ -1071,6 +1190,9 @@ class BaseStrategy(ABC):
         prev_mult_inf  = None
         last_good_eps: float | None = None  # most recent ε of an accepted iterate
         warm_init_armed_at: int | None = None  # outer index where we toggled warm_start_init_point
+        plateau_streak = 0
+        prev_obj_acc: float | None = None
+        prev_comp_acc: float | None = None
 
         k = 0
         while k < self.max_iter:
@@ -1084,9 +1206,17 @@ class BaseStrategy(ABC):
                 nlp.add_option("warm_start_init_point", "yes")
                 warm_init_armed_at = k
 
-            # Inner solver tolerance — linear (default) or quadratic (Leyffer).
+            # Inner solver tolerance.  ``linear`` and ``quadratic`` floor
+            # at ``user_tol`` (typically 1e-8) — IPOPT keeps chasing
+            # precision even when ε can no longer support it, which
+            # spins MAX_ITER on degenerate Scholtes NLPs.  ``matched``
+            # tracks ε directly with no user_tol floor: the inner tol
+            # loosens as ε shrinks, so IPOPT terminates at a precision
+            # the relaxation can actually deliver.
             if tol_mode == "quadratic":
                 inner_tol = max(user_tol, eps ** 1.5)
+            elif tol_mode == "matched":
+                inner_tol = max(tol_floor, tol_factor * eps)
             else:
                 inner_tol = max(user_tol, eps * 1e-2)
             nlp.add_option("tol", inner_tol)
@@ -1097,6 +1227,10 @@ class BaseStrategy(ABC):
                 snap_warm     = dict(warm_dual)
                 snap_eps      = eps
                 snap_prev_inf = prev_mult_inf
+                # Pre-NLP comp residual: lets us detect post-NLP iterates
+                # that are dramatically worse than the warm-start (e.g.
+                # IPOPT MAX_ITER returns a degraded iterate).
+                snap_pre_comp = self._comp_residual(snap_x)
 
             x, last_info, iter_time = self._timed_solve(nlp, x, warm_dual)
             total_time += iter_time
@@ -1137,9 +1271,20 @@ class BaseStrategy(ABC):
                     info.entered_restoration
                     and info.restoration_iter_count >= rest_threshold
                 )
+                # Post-NLP iterate dramatically worse than pre-NLP warm
+                # start.  Catches MAX_ITER cases where the inner solver
+                # returns a degraded iterate that tracked_eps alone may
+                # accept (e.g. when ε is very small but pre_comp was
+                # already smaller).
+                post_blew_up = (
+                    snap_pre_comp > 0.0
+                    and info.comp_residual > blowup_factor * snap_pre_comp
+                    and info.comp_residual > eps
+                )
                 rejected = (
                     not (status_ok and tracked_eps and mult_jump_ok)
                     or restoration_excess
+                    or post_blew_up
                 )
 
             if rejected:
@@ -1154,6 +1299,7 @@ class BaseStrategy(ABC):
                 ceiling    = last_good_eps if last_good_eps is not None else self.epsilon_0
                 eps        = min(snap_eps * eps_hold, ceiling)
                 prev_mult_inf = snap_prev_inf
+                plateau_streak = 0
                 rollback_run += 1
                 if rollback_run >= rollback_cap:
                     break
@@ -1183,6 +1329,29 @@ class BaseStrategy(ABC):
                     and info.comp_residual < self.comp_tol
                     and status_ok):
                 break
+
+            # Plateau termination: stop once both obj and comp_residual
+            # have stalled across consecutive accepted iterates and comp
+            # is already below the target.  Catches the "obj converged
+            # at outer iter k but loop keeps shrinking ε for nothing"
+            # pattern that wastes most of the wall time on poorly-scaled
+            # large problems.
+            if plateau_on and prev_obj_acc is not None:
+                d_obj = (abs(info.obj - prev_obj_acc)
+                         / max(abs(info.obj), 1e-12))
+                d_comp = (abs(info.comp_residual - prev_comp_acc)
+                          / max(prev_comp_acc, 1e-12))
+                comp_below_target = info.comp_residual <= plateau_target
+                if (d_obj < plateau_tol_obj
+                        and d_comp < plateau_tol_comp
+                        and comp_below_target):
+                    plateau_streak += 1
+                    if plateau_streak >= plateau_window:
+                        break
+                else:
+                    plateau_streak = 0
+            prev_obj_acc = info.obj
+            prev_comp_acc = info.comp_residual
 
             # ---------------- ε update ----------------
             if adaptive_on:

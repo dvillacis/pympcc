@@ -140,11 +140,22 @@ class StructuredMPCC:
     n_comp: int
     x0: np.ndarray
     objective: Callable[[np.ndarray], float]
-    gradient: Union[Callable[[np.ndarray], np.ndarray], str]
     comp_G: Callable[[np.ndarray], np.ndarray]
-    comp_G_jacobian: Union[Callable[[np.ndarray], np.ndarray], str]
     comp_H: Callable[[np.ndarray], np.ndarray]
-    comp_H_jacobian: Union[Callable[[np.ndarray], np.ndarray], str]
+
+    # ------------------------------------------------------------------ #
+    # Derivative callables — required, but may be omitted when the       #
+    # ``derivatives`` keyword (see below) auto-fills them.                #
+    # ------------------------------------------------------------------ #
+    gradient: Optional[Union[Callable[[np.ndarray], np.ndarray], str]] = None
+    comp_G_jacobian: Optional[Union[Callable[[np.ndarray], np.ndarray], str]] = None
+    comp_H_jacobian: Optional[Union[Callable[[np.ndarray], np.ndarray], str]] = None
+
+    # ------------------------------------------------------------------ #
+    # Default derivative source.  ``"jax"`` or ``"fd"`` auto-fills every #
+    # unset derivative field with the matching sentinel.                  #
+    # ------------------------------------------------------------------ #
+    derivatives: Optional[str] = None
 
     # ------------------------------------------------------------------ #
     # Variable bounds                                                       #
@@ -208,9 +219,57 @@ class StructuredMPCC:
             self.A_ineq = np.asarray(self.A_ineq, dtype=float)
         if self.b_ineq is not None:
             self.b_ineq = np.asarray(self.b_ineq, dtype=float)
+        self._apply_derivatives_default()
         self._resolve_jax_fields()
         self._resolve_fd_fields()
+        self._check_derivatives_resolved()
         self._validate()
+
+    def _apply_derivatives_default(self) -> None:
+        """Auto-fill ``None`` derivative fields with the ``derivatives`` sentinel."""
+        if self.derivatives is None:
+            return
+        if self.derivatives not in ("jax", "fd"):
+            raise ValueError(
+                f"derivatives must be None, 'jax', or 'fd'; got {self.derivatives!r}"
+            )
+        sentinel = self.derivatives
+
+        if self.gradient is None:
+            self.gradient = sentinel
+        if self.comp_G_jacobian is None:
+            self.comp_G_jacobian = sentinel
+        if self.comp_H_jacobian is None:
+            self.comp_H_jacobian = sentinel
+        if self.n_nl_eq > 0 and self.eq_nl is not None and self.jac_eq_nl is None:
+            self.jac_eq_nl = sentinel
+        if self.n_nl_ineq > 0 and self.ineq_nl is not None and self.jac_ineq_nl is None:
+            self.jac_ineq_nl = sentinel
+
+    def _check_derivatives_resolved(self) -> None:
+        """Raise a clear error when a required derivative is still missing."""
+        missing: list[str] = []
+        if self.gradient is None or isinstance(self.gradient, str):
+            missing.append("gradient")
+        if self.comp_G_jacobian is None or isinstance(self.comp_G_jacobian, str):
+            missing.append("comp_G_jacobian")
+        if self.comp_H_jacobian is None or isinstance(self.comp_H_jacobian, str):
+            missing.append("comp_H_jacobian")
+        if self.n_nl_eq > 0 and (
+            self.jac_eq_nl is None or isinstance(self.jac_eq_nl, str)
+        ):
+            missing.append("jac_eq_nl")
+        if self.n_nl_ineq > 0 and (
+            self.jac_ineq_nl is None or isinstance(self.jac_ineq_nl, str)
+        ):
+            missing.append("jac_ineq_nl")
+        if missing:
+            raise ValueError(
+                f"Missing derivative callable(s): {missing}. "
+                "Pass each as a callable, set the field to 'jax' or 'fd', "
+                "or pass derivatives='jax' / derivatives='fd' to fill all "
+                "unset derivative fields at once."
+            )
 
     def _resolve_jax_fields(self) -> None:
         """Replace any ``"jax"`` sentinel with a JAX-autodiff callable."""

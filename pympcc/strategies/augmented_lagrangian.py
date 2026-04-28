@@ -185,7 +185,7 @@ class AugmentedLagrangianStrategy(BaseStrategy):
         self.comp_tol: float = opts["comp_tol"]
         self.dual_warmstart: bool = bool(opts["dual_warmstart"])
         self.stagnation_iters: int = int(opts["stagnation_iters"])
-        self._init_cleanup(opts)
+        self._init_cleanup(opts, user_kwargs=kwargs)
 
     def solve(self) -> MPCCResult:
         p = self.problem

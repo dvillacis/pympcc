@@ -73,6 +73,35 @@ class ScholtesStrategy(BaseStrategy):
 
         return jax_hessian_lagrangian(lagrangian, p.n, p.x0, m, p.jax_sparsity_tol)
 
+    def _build_cleanup_hessian(self):
+        """Reuse the strategy Lagrangian Hessian for the cleanup NLP when a
+        manual Hessian is supplied; otherwise fall back to the universal
+        JAX cleanup-Hessian builder (``BaseStrategy``).
+
+        Cleanup constraint layout is ``[g, h, G, H]`` (size
+        ``n_g + n_h + 2·n_c``); the Scholtes layout is
+        ``[g, h, G, H, G·H]`` (size ``n_g + n_h + 3·n_c``).  The cleanup
+        Lagrangian is recovered by setting ``λ_GH = 0`` — i.e. padding
+        ``lam_cu`` with ``n_c`` zeros — so for manual Hessians we wrap
+        the user's callback without rebuilding anything.  For JAX
+        Hessians we instead let the base class compile the
+        cleanup-specific Lagrangian directly: same end result, smaller
+        traced computation graph than wrapping the strategy Hessian.
+        """
+        if not self._has_manual_hessian():
+            return super()._build_cleanup_hessian()
+
+        p = self.problem
+        base_hess = p.lagrangian_hessian
+        base_sp = p.lagrangian_hessian_sparsity
+        pad = p.n_comp
+
+        def cleanup_hess(x, lam_cu, obj_factor, _base=base_hess, _pad=pad):
+            lam_full = np.concatenate([np.asarray(lam_cu), np.zeros(_pad)])
+            return _base(x, lam_full, obj_factor)
+
+        return cleanup_hess, base_sp
+
     def __init__(self, problem, ipopt_options: dict, **kwargs) -> None:
         super().__init__(problem, ipopt_options,
                          backend=kwargs.pop("backend", "ipopt"),
@@ -94,7 +123,7 @@ class ScholtesStrategy(BaseStrategy):
         self.dual_warmstart: bool = bool(opts["dual_warmstart"])
         self.comp_tol: float | None = opts["comp_tol"]
         self._init_safeguards(opts)
-        self._init_cleanup(opts)
+        self._init_cleanup(opts, user_kwargs=kwargs)
 
     def solve(self) -> MPCCResult:
         p = self.problem

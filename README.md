@@ -1,6 +1,6 @@
 # pympcc
 [![PyPI](https://img.shields.io/pypi/v/pympcc)](https://pypi.org/project/pympcc/)
-[![CI](https://github.com/davidvillacis/pympcc/actions/workflows/tests.yml/badge.svg)](https://github.com/dvillacis/pympcc/actions/workflows/tests.yml)
+[![CI](https://github.com/dvillacis/pympcc/actions/workflows/tests.yml/badge.svg)](https://github.com/dvillacis/pympcc/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A Python package for solving **Mathematical Programs with Complementarity Constraints (MPCC)** using [IPOPT](https://github.com/coin-or/Ipopt) via [cyipopt](https://github.com/mechmotum/cyipopt), with an optional SciPy backend for small IPOPT-free runs.
@@ -119,23 +119,31 @@ pympcc.MPCCProblem(
     n_comp,                    # int — number of complementarity pairs
     x0,                        # (n,) — initial guess
     objective,                 # f(x)  → float
-    gradient,                  # ∇f(x) → (n,)
+    gradient,                  # ∇f(x) → (n,)   or "fd" / "jax"
 
-    comp_G,                    # G(x) → (n_comp,)   must be ≥ 0
-    comp_G_jacobian,           # ∇G(x) → (n_comp, n)  or 1-D nnz values if sparse
-    comp_H,                    # H(x) → (n_comp,)   must be ≥ 0
-    comp_H_jacobian,           # ∇H(x) → (n_comp, n)  or 1-D nnz values if sparse
+    # Complementarity — standard form:
+    comp_G=None,               # G(x) → (n_comp,)   must be ≥ 0
+    comp_G_jacobian=None,      # ∇G(x) → (n_comp, n)  or 1-D nnz values if sparse
+    comp_H=None,               # H(x) → (n_comp,)   must be ≥ 0
+    comp_H_jacobian=None,      # ∇H(x) → (n_comp, n)  or 1-D nnz values if sparse
+
+    # Complementarity — MCP variable-paired form (alternative to comp_G / comp_H):
+    comp_var_pairs=None,       # list of (var_idx, h_fn) or (var_idx, h_fn, h_jac_fn)
+                               # declares x[var_idx] ≥ 0 ⊥ h_fn(x) ≥ 0 per entry
 
     xl=None,                   # (n,) lower bounds on x  (default: −∞)
     xu=None,                   # (n,) upper bounds on x  (default: +∞)
 
     n_ineq=0,                  # number of inequality constraints g(x) ≤ 0
     ineq_constraints=None,     # g(x)  → (n_ineq,)
-    ineq_jacobian=None,        # ∇g(x) → (n_ineq, n)
+    ineq_jacobian=None,        # ∇g(x) → (n_ineq, n)  or "fd" / "jax"
 
     n_eq=0,                    # number of equality constraints h(x) = 0
     eq_constraints=None,       # h(x)  → (n_eq,)
-    eq_jacobian=None,          # ∇h(x) → (n_eq, n)
+    eq_jacobian=None,          # ∇h(x) → (n_eq, n)  or "fd" / "jax"
+
+    # Derivative shorthand — fills all unset derivative fields at once:
+    derivatives=None,          # "fd" or "jax"
 
     # Sparse Jacobian support (COO format) — see "Sparse Jacobians" section
     comp_G_jacobian_sparsity=None,   # (row_indices, col_indices)
@@ -144,12 +152,37 @@ pympcc.MPCCProblem(
     eq_jacobian_sparsity=None,
 
     # Analytical Lagrangian Hessian (optional) — see "Analytical Hessian" section
-    lagrangian_hessian=None,          # (x, lagrange, obj_factor) → nnz values; x-space (direct/scholtes/lin_fukushima)
+    lagrangian_hessian=None,          # (x, lagrange, obj_factor) → nnz values
     lagrangian_hessian_sparsity=None, # (row_indices, col_indices) — lower triangle, row ≥ col
-    lagrangian_hessian_slack=None,    # same signature but z=[x,s_G,s_H]-space; slack strategy only
+    lagrangian_hessian_slack=None,    # same but z=[x,s_G,s_H]-space; slack strategy only
     lagrangian_hessian_slack_sparsity=None,
+
+    # Finite-difference options:
+    fd_h=1.49e-8,              # step size (default: sqrt(machine epsilon))
+    fd_mode="forward",         # "forward" or "central"
 )
 ```
+
+#### Variable-paired complementarity (`comp_var_pairs`)
+
+Instead of writing `comp_G = lambda x: x[[j, k]]` manually, declare variable-paired complementarity at the variable level:
+
+```python
+problem = pympcc.MPCCProblem(
+    n=3, n_comp=2, x0=np.array([0.5, 0.5, 0.5]),
+    objective=..., gradient=...,
+    comp_var_pairs=[
+        # (var_idx, h_fn)            → x[0] ≥ 0 ⊥ x[1] ≥ 0   (fd Jacobian for h)
+        (0, lambda x: np.array([x[1]])),
+        # (var_idx, h_fn, h_jac_fn)  → x[1] ≥ 0 ⊥ x[2] ≥ 0   (exact Jacobian)
+        (1, lambda x: np.array([x[2]]), lambda x: np.array([0., 0., 1.])),
+    ],
+)
+```
+
+- `xl[var_idx]` is silently clamped to `max(xl[var_idx], 0.0)`.
+- The G-side Jacobian (identity rows) is always exact; `h_jac_fn` may be omitted to use forward FD.
+- **Mixed mode**: provide both `comp_G`/`comp_H` (for the first `n_comp − k` pairs) and `comp_var_pairs` (for the last `k` pairs). `n_comp` must equal the sum.
 
 ### `StructuredMPCC`
 
@@ -171,14 +204,9 @@ model = pympcc.StructuredMPCC(
     n_nl_ineq=1,
     ineq_nl=lambda x: np.array([x[0]**2 + x[1] - 2]),
     jac_ineq_nl=lambda x: np.array([[2*x[0], 1, 0, 0, 0]]),
-
-    # Finite-difference gradient (prototyping only):
-    # gradient="fd",
 )
 result = pympcc.solve(model)
 ```
-
-`StructuredMPCC` accepts `"fd"` as the value for `gradient`, `comp_G_jacobian`, `comp_H_jacobian`, `jac_eq_nl`, or `jac_ineq_nl`. `MPCCProblem` supports the same `"fd"` sentinel for `gradient`, `comp_G_jacobian`, `comp_H_jacobian`, `ineq_jacobian`, and `eq_jacobian`. Both warn at construction when FD is active. Use `fd_mode="central"` for higher accuracy.
 
 ### `solve`
 
@@ -187,18 +215,31 @@ result = pympcc.solve(
     problem,                   # MPCCProblem or StructuredMPCC
     strategy="scholtes",       # see strategy table above
     ipopt_options=None,        # dict of IPOPT options, e.g. {"max_iter": 500}
-    # Common strategy options (apply to all iterative strategies):
-    epsilon_0=1.0,             # initial relaxation/smoothing/penalty parameter
+
+    # Iterative strategy options:
+    epsilon_0=1.0,             # initial relaxation / smoothing / penalty parameter
     reduction=0.1,             # multiplicative reduction per outer iteration
     max_iter=20,               # maximum outer iterations
     epsilon_min=1e-8,          # stop when ε < epsilon_min
     dual_warmstart=True,       # warm-start dual variables between iterations
+
     # augmented_lagrangian-specific:
     rho_0=10.0,                # initial penalty
     rho_max=1e6,               # penalty cap
     tau=10.0,                  # penalty growth factor
     eta=0.25,                  # progress threshold
     comp_tol=1e-8,             # early stop on complementarity residual
+
+    # Diagnostics (CQ, B-stationarity, SOSC):
+    diagnostics=False,         # run §2.1 / §2.2 / §2.3 diagnostics after solve
+    b_stat_max_biactive=10,    # max biactive pairs for B-stat branch enumeration
+
+    # TNLP certified multiplier refinement:
+    tnlp_refine=False,         # re-solve with fixed active set → certified multipliers
+    tnlp_max_iter=500,         # IPOPT iteration limit for the TNLP solve
+
+    # Presolve:
+    presolve=False,            # run pinned-variable elimination + FBBT before solve
 )
 ```
 
@@ -214,12 +255,22 @@ result = pympcc.solve(
 | `status` | `int` | Raw IPOPT exit code |
 | `message` | `str` | Human-readable IPOPT status |
 | `strategy` | `str` | Strategy name used |
-| `stationarity` | `str` | Stationarity type: `"S-stationary"`, `"unknown"`, or `"not stationary"` |
-| `kkt_residual` | `float` or `None` | MPCC stationarity residual `‖∇f + Jgᵀλ_g + Jhᵀλ_h + JGᵀμ_G + JHᵀμ_H − z_L + z_U‖_∞`; `None` when multipliers unavailable |
-| `history` | `list[IterationInfo]` | Per-iteration diagnostics (iterative strategies only) |
-| `mult_g` | `(m,)` or `None` | Constraint multipliers from last inner IPOPT solve |
+| `stationarity` | `str` | `"S-stationary"`, `"W-stationary"`, or `"unknown"` |
+| `kkt_residual` | `float\|None` | `‖∇f + Jgᵀλ_g + Jhᵀλ_h + JGᵀμ_G + JHᵀμ_H‖_∞` |
+| `history` | `list[IterationInfo]` | Per-iteration diagnostics (iterative strategies) |
+| `mult_g` | `(m,)\|None` | Constraint multipliers from the last inner IPOPT solve |
+| `per_pair_status` | `list[str]` | Per-pair label: `"G_active"`, `"H_active"`, `"biactive"`, `"inactive"` |
+| `cq` | `str\|None` | CQ at solution: `"MPCC-LICQ"`, `"MPCC-MFCQ"`, `"none"`, `"unknown"` (requires `diagnostics=True`) |
+| `cq_rank_deficit` | `int\|None` | Rows minus rank of active-gradient matrix; 0 ⇔ LICQ |
+| `b_stationary` | `str\|None` | `"B-stationary"`, `"not B-stationary"`, `"intractable"` (requires `diagnostics=True`) |
+| `sosc` | `bool\|None` | SOSC: `True` = strict local min, `False` = not, `None` = skipped (requires `diagnostics=True`) |
+| `sosc_min_eigenvalue` | `float\|None` | Minimum eigenvalue of the reduced Hessian W = Z^T ∇²L Z |
+| `sosc_skipped_reason` | `str\|None` | Why SOSC was skipped: `"biactive_pairs"`, `"not_converged"`, or `None` |
+| `mult_comp_G_mpcc` | `(n_comp,)\|None` | Certified MPCC multipliers μ_G (requires `tnlp_refine=True`) |
+| `mult_comp_H_mpcc` | `(n_comp,)\|None` | Certified MPCC multipliers μ_H (requires `tnlp_refine=True`) |
+| `tnlp_refined` | `TNLPResult\|None` | Full TNLP sub-result (requires `tnlp_refine=True`) |
 
-`IterationInfo` fields: `epsilon`, `x`, `obj`, `status`, `message`, `comp_residual`.
+`IterationInfo` fields: `epsilon`, `x`, `obj`, `status`, `message`, `comp_residual`, `comp_residual_mean`, `n_ipopt_iter`, `iter_time`.
 
 ---
 
@@ -259,6 +310,39 @@ result = pympcc.solve(problem, strategy="scholtes")
 print(f"x={result.x[:2]}, f*={result.obj:.4f}")   # x=[1. 0.], f*=17.0000
 ```
 
+### Variable-paired complementarity
+
+For simple `x[j] ≥ 0 ⊥ F(x) ≥ 0` pairs, use `comp_var_pairs` to skip writing `comp_G` manually:
+
+```python
+# min (x0-1)² + (x1-1)²  s.t.  x0 ≥ 0 ⊥ x1 ≥ 0
+problem = pympcc.MPCCProblem(
+    n=2, n_comp=1, x0=np.array([0.5, 0.5]),
+    objective=lambda x: (x[0]-1)**2 + (x[1]-1)**2,
+    gradient=lambda x: np.array([2*(x[0]-1), 2*(x[1]-1)]),
+    comp_var_pairs=[
+        (0, lambda x: np.array([x[1]]), lambda x: np.array([0., 1.])),
+    ],
+)
+result = pympcc.solve(problem, strategy="scholtes")
+```
+
+### Finite-difference derivatives
+
+```python
+import warnings
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")          # suppress FD UserWarning
+    problem = pympcc.MPCCProblem(
+        n=2, n_comp=1, x0=np.array([0.5, 0.5]),
+        objective=lambda x: (x[0]-1)**2 + (x[1]-1)**2,
+        comp_var_pairs=[(0, lambda x: np.array([x[1]]))],
+        derivatives="fd",                    # fills gradient + all Jacobians
+    )
+result = pympcc.solve(problem, strategy="scholtes")
+```
+
 ### Inspecting iteration history
 
 ```python
@@ -267,6 +351,51 @@ result = pympcc.solve(problem, strategy="scholtes", max_iter=10)
 for it in result.history:
     print(f"ε={it.epsilon:.2e}  obj={it.obj:.6f}  comp={it.comp_residual:.2e}")
 ```
+
+### Per-pair status and structured export
+
+`result.per_pair_status` is always populated; each entry is one of `"G_active"`, `"H_active"`, `"biactive"`, or `"inactive"`.
+
+```python
+result = pympcc.solve(problem, strategy="scholtes")
+print(result.per_pair_status)   # ["H_active"]
+
+# Serialize to JSON:
+json_str = result.to_json()
+
+# Per-pair DataFrame (requires pandas):
+df = result.to_dataframe()
+# Columns: pair, G, H, GH, status, mu_G, mu_H (last two when tnlp_refine=True)
+```
+
+### Diagnostics: CQ, B-stationarity, and SOSC
+
+```python
+result = pympcc.solve(problem, strategy="scholtes", diagnostics=True)
+
+print(result.cq)               # "MPCC-LICQ"
+print(result.b_stationary)     # "B-stationary"
+print(result.sosc)             # True  — strict local minimiser
+print(result.sosc_min_eigenvalue)  # > 0
+```
+
+**SOSC** checks positive definiteness of the reduced Lagrangian Hessian on the critical cone:
+- `True` — `x*` is a certified strict local minimiser.
+- `False` — saddle point or only a local max in some direction.
+- `None` — skipped (biactive pairs present, or solve did not converge); check `result.sosc_skipped_reason`.
+
+### TNLP certified multipliers
+
+```python
+result = pympcc.solve(problem, strategy="scholtes",
+                      diagnostics=True, tnlp_refine=True)
+
+print(result.mult_comp_G_mpcc)  # certified μ_G (≥ 0 at S-stationary points)
+print(result.mult_comp_H_mpcc)  # certified μ_H
+print(result.stationarity)      # "S-stationary" or "W-stationary"
+```
+
+TNLP refinement re-solves a tightened NLP with the active set fixed as equalities. This extracts MPCC-clean multipliers and certifies S- or W-stationarity. The FD-based SOSC check uses TNLP multipliers when available (most accurate).
 
 ### Sparse Jacobians (large-n problems)
 
@@ -284,7 +413,7 @@ problem = pympcc.MPCCProblem(
 )
 ```
 
-All six strategies dispatch to the sparse NLP adapter automatically when any sparsity field is set. Derived blocks (`G·H`, `G+H`, `φ_ε`) use the union of the G and H sparsity patterns — no dense `(m, n)` matrix is ever allocated on hot-path callbacks.
+All six strategies dispatch to the sparse NLP adapter automatically when any sparsity field is set.
 
 ### Slack strategy for large-n problems
 
@@ -303,108 +432,87 @@ For an imaging application with `n=10,000` and `n_comp=50`:
 
 ### Analytical Lagrangian Hessian
 
-By default IPOPT uses a limited-memory BFGS (L-BFGS) Hessian approximation. For problems where you can provide the exact Lagrangian Hessian you can supply it directly to get better convergence in the inner NLP solves.
+By default IPOPT uses L-BFGS. Supplying the exact Hessian improves inner-NLP convergence:
 
 ```python
-# H_L(x, λ, σ) = σ·∇²f + Σ_i λ_i ∇²c_i
-# Return: 1-D array of nnz values (lower triangle, row ≥ col)
-
 def my_hessian(x, lagrange, obj_factor):
-    # For a problem with n_eq equality constraints and n_comp complementarity pairs.
     # Multiplier ordering (direct / scholtes / lin_fukushima):
-    #   lagrange = [λ_g (n_ineq), λ_h (n_eq), λ_G (n_comp), λ_H (n_comp), λ_GH (n_comp)]
-    # lin_fukushima appends one extra λ_GpH (n_comp) block (G+H is linear → zero Hessian).
+    #   lagrange = [λ_g (n_ineq), λ_h (n_eq), λ_G (n_comp), λ_H (n_comp)]
     ...
-    return nnz_values  # shape (nnz,)
-
-hess_rows = np.array([...])  # row indices, row ≥ col
-hess_cols = np.array([...])  # col indices
+    return nnz_values  # shape (nnz,), lower triangle
 
 problem = pympcc.MPCCProblem(
     ...,
     lagrangian_hessian=my_hessian,
-    lagrangian_hessian_sparsity=(hess_rows, hess_cols),
+    lagrangian_hessian_sparsity=(hess_rows, hess_cols),  # (row_indices, col_indices), row ≥ col
 )
 result = pympcc.solve(problem, strategy="scholtes")
 ```
 
-The `slack` strategy operates in the lifted space `z = [x, s_G, s_H]` (length `n + 2·n_comp`). Its Hessian callable receives a `z` vector and multipliers in the lifted-constraint ordering `[λ_h, λ_{G−s_G}, λ_{H−s_H}, λ_{s_G s_H}]`:
-
-```python
-problem = pympcc.MPCCProblem(
-    ...,
-    lagrangian_hessian_slack=my_hessian_slack,
-    lagrangian_hessian_slack_sparsity=(slack_rows, slack_cols),
-)
-result = pympcc.solve(problem, strategy="slack")
-```
+The `slack` strategy uses `lagrangian_hessian_slack` with `z = [x, s_G, s_H]`.
 
 **Notes:**
-- Supports `direct`, `scholtes`, and `lin_fukushima` via `lagrangian_hessian`; supports `slack` via `lagrangian_hessian_slack`.
-- `augmented_lagrangian` and `smoothing` are not supported — the PHR penalty and Fischer-Burmeister smoothing introduce second-derivative terms that cannot be expressed as a static callable.
-- If only one of the two Hessian fields is set, the supported strategies use the provided Hessian while the remaining strategies fall back to L-BFGS.
-- If JAX is installed (`pip install "pympcc[jax]"`), autodiff Hessians are computed automatically when no manual Hessian is provided.
-- The exact Hessian can be indefinite near MPCC solutions (LICQ typically fails there). If IPOPT enters a restoration phase with the exact Hessian, switching to L-BFGS (i.e., omitting the Hessian fields) is often more robust.
+- Compatible: `direct`, `scholtes`, `lin_fukushima` (via `lagrangian_hessian`); `slack` (via `lagrangian_hessian_slack`).
+- Not compatible: `augmented_lagrangian`, `smoothing` — their objective perturbations add second-derivative terms not captured by a static callable.
+- The SOSC check uses the user-supplied Hessian when present, eliminating FD cost.
 
-### Verbose IPOPT output
+### Benchmark runner
 
 ```python
-result = pympcc.solve(problem, ipopt_options={"print_level": 5})
+from pympcc.benchmarks import run_benchmark, print_table, save_csv
+
+results = run_benchmark(strategies=["scholtes", "smoothing"], verbose=True)
+print_table(results)
+save_csv(results, "results.csv")
 ```
 
-### Stationarity classification and KKT residual
+CLI:
 
-```python
-result = pympcc.solve(problem, strategy="scholtes")
-print(result.stationarity)     # "S-stationary"
-print(result.kkt_residual)     # ~1e-10 for converged solves
-
-# Or call directly with a tolerance:
-from pympcc import classify_stationarity
-stat = classify_stationarity(result, problem, tol=1e-6)
+```bash
+python -m pympcc.benchmarks.macmpec --strategy scholtes,smoothing --out results.csv
 ```
 
-> **Note:** Because IPOPT uses a primal-dual interior-point method, the barrier forces
-> all active lower-bound constraint multipliers to be non-negative at convergence, so
-> `result.stationarity` is almost always `"S-stationary"` for fully-converged IPOPT
-> solutions. Use `result.kkt_residual` as the primary quality metric — values below
-> `1e-6` indicate a well-converged KKT point.
+13 MacMPEC problems are bundled (`pympcc/benchmarks/_problems.py`). See `ROADMAP.md §6.4` for paths to the full 150-problem Leyffer collection.
 
 ---
 
 ## Testing
 
 ```bash
-pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
-The test suite covers all six strategies against the [MacMPEC benchmark collection](https://wiki.mcs.anl.gov/leyffer/index.php/MacMPEC) (Leyffer, 2000).
+The test suite covers all six strategies, all diagnostic modules, and the MacMPEC benchmark collection.
 
 | File | Contents |
 |---|---|
-| `tests/macmpec_problems.py` | 13 MacMPEC problems with exact Jacobians and known optima |
-| `tests/test_macmpec.py` | Parametrized benchmark tests: convergence, objective accuracy, complementarity feasibility, KKT residual |
+| `tests/test_macmpec.py` | Parametrized benchmark: convergence, objective accuracy, complementarity, KKT |
 | `tests/test_strategies.py` | Unit tests for all strategies, options, result fields, and problem validation |
-| `tests/test_kernels.py` | Correctness tests for the hot-path numerical kernels |
-| `tests/test_stationarity.py` | Stationarity classification logic |
+| `tests/test_diagnostics.py` | CQ classification and active-set tests |
+| `tests/test_sosc.py` | SOSC direct unit tests and solver integration (16 cases) |
+| `tests/test_tnlp.py` | TNLP refinement, stationarity classification, biactivity pre-screen |
+| `tests/test_mcp_var_pairs.py` | Variable-paired complementarity: construction, mixed mode, solve equivalence (21 cases) |
+| `tests/test_per_pair_status.py` | Per-pair status, `to_json`, `to_dataframe` |
+| `tests/test_kernels.py` | Hot-path numerical kernel correctness |
+| `tests/test_stationarity.py` | Stationarity classification and KKT residual |
 
 **MacMPEC problems included:**
 
-| Problem | n | n_comp | f* | Notes |
-|---|---|---|---|---|
-| kth1 | 2 | 1 | 0 | Trivial LPEC |
-| kth2 | 4 | 2 | 0 | Two-comp extension of kth1 |
-| ralph1 | 2 | 1 | 0 | B-stationary only |
-| simple | 2 | 1 | 1 | Quadratic |
-| simple_ineq | 2 | 1 | 1 | Simple with active inequality constraint |
-| gauvin | 3 | 2 | 20 | Gauvin-Savard |
-| bard1 | 5 | 3 | 17 | KKT bilevel (Bard 1991) |
-| scholtes1 | 3 | 1 | 2 | Nonlinear (Scholtes 1997) |
-| scholtes2 | 3 | 1 | 15 | Nonlinear (Scholtes 1997) |
-| chain2 | 3 | 2 | 4 | Chain network, two comp pairs |
-| bilevel1 | 4 | 2 | 0 | Bilevel with G=H=0 at optimum |
-| outrata31 | 6 | 2 | 0 | KKT bilevel with 2 equalities |
-| outrata32 | 9 | 3 | 0 | KKT bilevel with 3 equalities (Outrata 1994) |
+| Problem | n | n_comp | f* |
+|---|---|---|---|
+| kth1 | 2 | 1 | 0 |
+| kth2 | 4 | 2 | 0 |
+| ralph1 | 2 | 1 | 0 |
+| simple | 2 | 1 | 1 |
+| simple_ineq | 2 | 1 | 1 |
+| gauvin | 3 | 2 | 20 |
+| bard1 | 5 | 3 | 17 |
+| scholtes1 | 3 | 1 | 2 |
+| scholtes2 | 3 | 1 | 15 |
+| chain2 | 3 | 2 | 4 |
+| bilevel1 | 4 | 2 | 0 |
+| outrata31 | 6 | 2 | 0 |
+| outrata32 | 9 | 3 | 0 |
 
 > The `direct` strategy tests are marked `xfail(strict=False)` because LICQ generically fails at MPCC feasible points.
 

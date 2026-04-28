@@ -4,8 +4,26 @@ This roadmap tracks parity with commercial MPCC solvers (KNITRO MPEC,
 GAMS-NLPEC, FilterMPEC, BARON-MPCC) across presolve, diagnostics,
 solution methods, and modeling UX.
 
-Items are tagged ✅ *shipped*, *in progress*, or *planned*.  Scope
+Items are tagged ✅ *shipped*, 🔄 *in progress*, or *planned*.  Scope
 estimates: **S** (≲200 lines + tests), **M** (~500–1500), **L** (multi-week).
+
+---
+
+## Near-term priority queue (gap analysis vs. commercial solvers)
+
+Ordered by impact-to-effort ratio derived from the commercial-grade gap
+analysis.  Complete each tier before starting the next.
+
+| # | Item | Section | Scope | Status |
+|---|------|---------|-------|--------|
+| 1 | Per-pair status + `to_json` / `to_dataframe` | §4.6 | S | ✅ |
+| 2 | TNLP refinement (certified MPCC multipliers) | §2.6 | M | ✅ |
+| 3 | SOSC — second-order sufficient conditions | §2.3 | M | ✅ |
+| 4 | Variable-paired complementarity (MCP form) | §4.5 | M | ✅ |
+| 5 | Bilevel KKT-emitter frontend | §5.4 | M | planned |
+| 6 | NCP-function reformulation menu | §3.5 | M | planned |
+| 7 | MacMPEC full benchmark runner (150 problems) | §4.7 | S | ✅ |
+| 8 | Branch-and-bound (global MPCC) | §3.1 | L | deferred |
 
 ---
 
@@ -215,15 +233,37 @@ B-stationary.
 Module: `pympcc/_stationarity.py` — `verify_b_stationarity`.
 Tests: `tests/test_b_stationarity.py`, `tests/test_diagnostics.py`.
 
-### 2.3. Second-order condition (MPCC-SOSC) — (M)
+### 2.3. Second-order condition (MPCC-SOSC) ✅ *(shipped)*
 
 Checks the reduced Lagrangian Hessian is positive definite on the
-critical cone — verifies `x*` is a strict local minimiser, not a
-saddle.  Requires the Lagrangian Hessian (already exposed via
-`MPCCProblem.lagrangian_hessian` when supplied; else finite-difference
-fallback).
+MPCC critical cone — verifies `x*` is a strict local minimiser, not
+a saddle.
 
-Surface as `result.sosc` ∈ {`True`, `False`, `None`}.
+**Algorithm:**
+
+1. Build the active constraint gradient matrix A (rows from ∇h, ∇G_{I_G},
+   ∇H_{I_H}, ∇g_{I_g}, and unit variable-bound rows).
+2. Compute null-space basis Z of A via SVD.
+3. Form reduced Hessian W = Z^T H Z, where H = ∇²_xx L(x*, λ).
+4. SOSC holds iff min_eigenvalue(W) > 0.
+
+**Hessian sources (priority order):**
+* `MPCCProblem.lagrangian_hessian` (user-supplied, lower-triangle COO or dense).
+* Central FD of ∇_x L using multipliers from TNLP refinement (best) or
+  zeros (conservative fallback when no TNLP is available).
+
+**Result fields:**
+* `result.sosc` ∈ {`True`, `False`, `None`}
+* `result.sosc_min_eigenvalue` — minimum eigenvalue of W (None when skipped)
+* `result.sosc_skipped_reason` ∈ {`None`, `"not_converged"`,
+  `"biactive_pairs"`, `"no_hessian_callable_and_fd_failed"`}
+
+Biactive pairs (I_00 ≠ ∅) make the critical cone non-convex;
+the check returns `None` in that case.
+
+Module: `pympcc/_sosc.py` — `sosc_check`.
+Hook: `MPCCSolver._attach_diagnostics` (runs when `diagnostics=True`).
+Tests: `tests/test_sosc.py` (16 cases).
 
 ### 2.4. IIS / minimal infeasible subsystem — (L)
 
@@ -233,17 +273,35 @@ constraints whose joint infeasibility certifies the original.  Useful
 for debugging large bilevel formulations where infeasibility is hard
 to localise.
 
-### 2.5. Solver telemetry — (S)
+### 2.5. Solver telemetry ✅ *(shipped)*
 
 Per-iteration log of ε, complementarity residual, KKT residual,
-biactive-set size, CQ rank deficit.  Most pieces already on
-`IterationInfo`; needs a single `result.summary()` formatter.
+biactive-set size, CQ rank deficit.  Exposed via `result.summary(verbosity=2)`
+and `result.history`; structured export covered by §4.6.
+
+### 2.6. TNLP refinement / B-stationarity by solve ✅ *(shipped)*
+
+After the relaxation converges, fix the active set
+`(I_G, I_H, I_GH)` at the final iterate and re-solve the resulting
+**tightened NLP** as a regular equality-constrained problem.  This is
+the postprocessing step KNITRO's `mpec_finalize` and FilterMPEC use
+to (a) clean up multipliers, (b) extract MPCC-stationarity multipliers
+`(λ^G, λ^H)` with correct signs by *solving* rather than enumerating,
+and (c) certify B-stationarity when the biactive set is too large for
+the §2.2 LP enumeration (`|I_00| > max_biactive`).
+
+Surface as `result.tnlp_refined` (sub-result) plus refined
+`mult_comp_G` / `mult_comp_H`.  Skipped silently when the relaxation
+already returned MPCC-LICQ S-stationary multipliers.
+
+Module: `pympcc/_tnlp.py` (new); hook into `MPCCSolver.solve()`
+behind `tnlp_refine=True` (or auto-on when `diagnostics=True`).
 
 ---
 
 ## 3. Solution methods
 
-### 3.1. Branch-and-bound on disjunctions — (L)
+### 3.1. Branch-and-bound on disjunctions — (L) · *priority 8 (deferred)*
 
 For each pair branch `G_i = 0` ∨ `H_i = 0` and solve each leaf as a
 regular NLP.  Globalises the local NLP relaxation; finds non-S
@@ -262,14 +320,22 @@ on the comp pairs and solve the resulting equality-constrained QP at
 each iterate.  Following Fletcher–Leyffer FilterMPEC.  Faster on
 problems with a clear active set but more brittle near degeneracy.
 
-### 3.3. Multi-start wrapper — (S)
+### 3.3. Multi-start wrapper ✅ *(shipped)*
 
-Run any strategy from `K` randomly perturbed starts; return the best
-local optimum plus all encountered stationary points.  Cheap publishable
-addition; directly addresses single-start bias in the bilevel paper.
+`pympcc.multistart(problem, *, n_starts=16, perturb_scale=0.1, seed=0,
+**solve_kwargs)` runs :func:`pympcc.solve` from ``n_starts`` perturbed
+starting points and returns a :class:`MultiStartResult` exposing
+``.best``, ``.runs``, ``.n_success``, and ``.unique_optima(...)`` for
+basin clustering.  The first start uses ``problem.x0`` verbatim;
+subsequent starts perturb each coordinate by Gaussian noise with
+standard deviation ``perturb_scale * max(|x0|, 1)`` and clip to
+``[xl, xu]``.  ``problem.x0`` is restored on return.
 
-Module: `pympcc/multistart.py`.  API: `pympcc.solve(problem, ...,
-n_starts=16, perturb_scale=0.1)`.
+`pympcc.solve(problem, ..., n_starts=N, perturb_scale=..., multistart_seed=...)`
+dispatches to the multistart wrapper when ``N > 1``.
+
+Module: `pympcc/multistart.py`.
+Tests: `tests/test_multistart.py` (18 cases).
 
 ### 3.4. Elastic-mode penalty — (M)
 
@@ -279,11 +345,56 @@ to Scholtes / smoothing when those stall on highly degenerate problems.
 
 Module: `pympcc/strategies/elastic.py`.
 
+### 3.5. NCP-function reformulation menu — (M) · *priority 6*
+
+GAMS-NLPEC ships ~12 reformulations as switches.  pympcc has 6;
+adding the most-cited remaining NCP functions makes the package a
+direct benchmarking platform for the reformulation literature.
+Targets:
+
+* **min-NCP** — `min(G, H) = 0` smoothed via
+  `½(G + H − √((G−H)² + 4ε²))`.
+* **Chen-Chen-Kanzow** `φ_λ(a,b) = λ·φ_FB(a,b) + (1−λ)·a₊·b₊`
+  (interpolates Fischer-Burmeister and penalised inner-product).
+* **Kanzow-Schwartz** `(G + H) − √(G² + H² + 2λGH)` for
+  `λ ∈ [0, 1)`.
+
+Each lands as its own thin strategy class reusing the smoothing
+ε-continuation harness.  No new infrastructure.
+
+Module: `pympcc/strategies/ncp_*.py`.
+
+### 3.6. Adaptive penalty escalation — (S)
+
+Extends §3.4: instead of a single global penalty parameter, escalate
+the penalty *only on violated complementarity pairs* (Leyffer-López-
+Calva-Nocedal, SIAM 2006).  Tracks a per-pair penalty vector `ρ_i`
+that doubles whenever pair `i` exceeds the target residual.
+
+Diagnostic: report number of pairs that needed escalation (`result.
+n_pairs_escalated`).  High counts flag genuinely degenerate pairs.
+
+Wires into `pympcc/strategies/elastic.py` and the existing
+`augmented_lagrangian.py`.
+
+### 3.7. LPCC / QPCC fast-path subsolver — (M)
+
+When `f` is linear or quadratic and `g, h, G, H` are linear, the
+MPCC is an LPCC / QPCC.  Specialised pivoting (Fletcher-Leyffer
+piecewise-linear active-set) is dramatically faster than the
+nonlinear NLP path and gives an exact reference solution for
+benchmarking.  Detection extends presolve B4
+(linear-comp-pair detection); the subsolver consumes it.
+
+Module: `pympcc/strategies/lpcc.py`.  Auto-dispatch when every
+constraint passes the linearity probe; falls back to the user's
+chosen nonlinear strategy otherwise.
+
 ---
 
 ## 4. Modeling & user experience
 
-### 4.1. Pyomo / mpec.complementarity bridge — (M)
+### 4.1. Pyomo / mpec.complementarity bridge — (M) · *planned*
 
 Today users hand-roll callables and COO sparsity.  A Pyomo backend
 would let users write
@@ -293,26 +404,126 @@ COO bookkeeping in `bilevel_mpcc_imaging/problem.py`.
 
 Module: `pympcc/frontend/pyomo.py`.
 
-### 4.2. Default JAX-AD path — (S)
+### 4.2. Default JAX-AD path ✅ *(shipped)*
 
-`_jax.py` exists but isn't the default.  Lift it so users can pass
-`objective` / `comp_G` / `comp_H` as JAX-traceable functions and have
-gradients, Jacobians, and sparsity patterns derived automatically.
+`MPCCProblem` and `StructuredMPCC` accept a top-level
+``derivatives`` keyword.  Setting ``derivatives="jax"`` (or
+``"fd"``) auto-fills every unset derivative field — ``gradient``,
+every Jacobian — with the matching sentinel before resolution.
+Users supplying JAX-traceable ``objective`` / ``comp_G`` / ``comp_H``
+no longer need to spell out the gradient or any Jacobian, and the
+existing per-field sentinel API (``comp_G_jacobian="jax"``, …)
+remains supported for partial opt-in.
 
-### 4.3. Auto pair-scaling — (S)
+A clear error is raised when a required derivative is left
+unresolved (no callable, no sentinel, no ``derivatives`` keyword).
 
-`comp_G_scale` / `comp_H_scale` fields exist but no detector
-populates them.  Add a probe that evaluates `|G_i(x0)|, |H_i(x0)|`
-across a small batch of perturbations and rescales pairs whose
-typical magnitudes differ by > 1e3.
+Module: `pympcc/problem.py` and `pympcc/models.py` —
+`_apply_derivatives_default`, `_check_derivatives_resolved`.
+Tests: `tests/test_derivatives_default.py` (14 cases).
+
+### 4.3. Auto pair-scaling ✅ *(shipped)*
+
+`pympcc.autoscale_comp_pairs(problem, *, threshold=1e3, n_probes=5,
+seed=0, ...)` probes `|G_i|, |H_i|` at `x0` and a handful of bounded
+perturbations, takes per-pair medians, and returns diagonal scales
+`(s_G, s_H)` that equilibrate pairs whose `max/min` magnitude ratio
+exceeds `threshold`.  Well-conditioned pairs are left at unit scale.
+
+`pympcc.solve(..., autoscale=True)` runs the detector after presolve,
+populates `problem.comp_G_scale` / `comp_H_scale`, and emits a single
+`UserWarning` summarising how many pairs were rescaled.  User-supplied
+scales always win over the detector.
 
 Module: `pympcc/_autoscale.py`.
+Solver hook: `MPCCSolver._apply_autoscale` in `pympcc/solver.py`.
+Tests: `tests/test_autoscale.py` (14 cases).
 
-### 4.4. Result repr / summary formatter — (S)
+### 4.4. Result repr / summary formatter ✅ *(shipped)*
 
-Single `result.summary(verbosity=...)` that prints obj, comp residual,
-CQ class, stationarity class, B-stat verdict, SOSC verdict, biactive
-set size.
+`result.summary(verbosity=0|1|2)` prints obj, comp residual, CQ class,
+stationarity class, B-stat verdict, biactive set size, and full per-iteration
+history.  Structured machine-readable export covered by §4.6.
+
+### 4.5. Variable-paired complementarity (MCP form) ✅ *(shipped)*
+
+`MPCCProblem` now accepts a `comp_var_pairs` field — a list of
+`(var_idx, h_fn)` or `(var_idx, h_fn, h_jac_fn)` tuples that declare
+`x[var_idx] >= 0 ⊥ h_fn(x) >= 0` directly at the variable level,
+without needing a manual `G(x) = x[var_idx]` row in `comp_G`.
+
+Two modes:
+* **All-var-pairs** (`comp_G=None`): every pair is declared via
+  `comp_var_pairs`; `len(comp_var_pairs)` must equal `n_comp`.
+* **Mixed**: `comp_G`/`comp_H` supply the first `n_comp − k` pairs;
+  `comp_var_pairs` appends the remaining `k` pairs.
+
+`xl[var_idx]` is silently clamped to `max(xl[var_idx], 0.0)`.
+G-side Jacobian rows are built exactly (identity matrix rows); H-side
+rows use the supplied `h_jac_fn` or forward fd when omitted.
+`derivatives="fd"` or `derivatives="jax"` compose naturally with this
+field — the merged callables are standard `comp_G`/`comp_H` from each
+strategy's perspective.
+
+Module: `pympcc/problem.py` (`comp_var_pairs` field + `_normalize_var_pairs()`).
+Tests: `tests/test_mcp_var_pairs.py` (21 cases).
+
+### 4.6. Per-pair status & structured result export ✅ *(shipped)*
+
+`result.per_pair_status` (list of `"G_active"`, `"H_active"`,
+`"biactive"`, `"inactive"`) is populated by `MPCCSolver._attach_per_pair_status`
+after every solve using an adaptive threshold `max(sqrt(comp_residual), 1e-6)`
+to distinguish near-biactive from cleanly active pairs.
+
+`result.mult_comp_G_mpcc` / `mult_comp_H_mpcc` are populated from
+the TNLP active-set refinement (§2.6) when `tnlp_refine=True` and the
+refinement succeeds; `None` otherwise.
+
+`result.to_json()` serialises the full result (arrays as lists, `None`
+as JSON `null`, history omitted) including `per_pair_status` and the
+TNLP sub-result when present.  `result.to_dataframe()` returns a
+per-pair `pandas.DataFrame` with columns `pair`, `G`, `H`, `GH`,
+`status`, and (when available) `mu_G`, `mu_H`.
+
+Module: `pympcc/result.py`.
+Tests: `tests/test_per_pair_status.py` (20 cases), `tests/test_summary.py` (19 cases).
+
+### 4.7. MacMPEC benchmark runner ✅ *(shipped — 13 problems)*
+
+`pympcc.benchmarks.macmpec` runs any subset of the current 13-problem
+suite and emits a Leyffer-style results table.  The problem registry
+(`pympcc/benchmarks/_problems.py`) is the authoritative source;
+`tests/macmpec_problems.py` is now a thin re-export shim.
+
+CLI: `python -m pympcc.benchmarks.macmpec [--strategy ...] [--problems ...] [--out file.csv] [--quiet]`
+
+Programmatic: `from pympcc.benchmarks import run_benchmark, print_table, save_csv`.
+
+Module: `pympcc/benchmarks/` (`__init__.py`, `_problems.py`, `macmpec.py`).
+
+**Gap vs. full MacMPEC (≈150 problems):** the actual Leyffer collection is
+distributed as AMPL `.mod`/`.dat` files.  Reaching ~150 problems requires
+one of the approaches in §6.4:
+
+* **Hand-coding** — exact Jacobians, no new dependencies; ~weeks of work
+  for the full set.
+* **AMPL Python API** — parse `.nl` files directly; adds AMPL SDK
+  dependency, Jacobians via finite differences.
+* **pycutest** — ~50 MPCC problems with gradient/Jacobian support;
+  most practical near-term path to a larger suite without hand-coding.
+
+Expanding the suite is tracked under §6.4.
+
+### 4.8. Inner-iteration callback hook — (S) · *planned*
+
+Today `callback(k, info)` fires once per *outer* iteration (post-NLP).
+KNITRO and IPOPT both support a per-NLP-iter `intermediate_callback`
+for live visualisation, early stopping, and trust-region adaptation.
+Forward IPOPT's `intermediate_callback` through the strategy layer
+as `inner_callback(iter, info_dict) -> bool` (return `False` to
+stop).  Useful for research users plotting convergence in real time.
+
+Module: extension to `pympcc/_nlp.py` (`_DenseNLP.intermediate`).
 
 ---
 
@@ -331,16 +542,118 @@ implicit-function differentiation through the active set.
 Module: `pympcc/sensitivity.py`.  API: `pympcc.sensitivity(result,
 dp, ...)`.
 
-### 5.2. Multiplier warm-start — (S)
+### 5.2. Multiplier warm-start ✅ *(shipped)*
 
-Today the strategy layer warm-starts only the primal `x`.  Carrying
-`mult_g`, `mult_x_L`, `mult_x_U` between outer iterations can
-dramatically speed up ε-continuation and parametric sweeps.
+All five iterative strategies (`scholtes`, `smoothing`, `lin_fukushima`,
+`slack`, `augmented_lagrangian`) carry `mult_g`, `mult_x_L`, `mult_x_U`
+between outer iterations via the `warm_dual` dict in
+`_run_epsilon_continuation`, and toggle IPOPT's
+`warm_start_init_point=yes` after the first NLP solve.  On by default
+(`dual_warmstart=True`); pass `dual_warmstart=False` to disable.
+Empirical impact: ~25–30% fewer IPOPT iterations across the MacMPEC
+benchmark suite.
+
+Module: `pympcc/strategies/_base.py` — `_run_epsilon_continuation`,
+`_timed_solve` (passes `lagrange`/`zl`/`zu` kwargs to cyipopt).
 
 ### 5.3. EPEC / VI extension — (L)
 
 Equilibrium problems with equilibrium constraints; out of scope for
 the SIAM imaging paper but a natural follow-up.
+
+### 5.4. Bilevel KKT-emitter frontend — (M) · *priority 5*
+
+BilevelJuMP, YALMIP `solvebilevel`, and (historically) `pyomo.bilevel`
+accept `(F_upper, F_lower, vars_upper, vars_lower)` and emit the MPCC
+by writing the lower-level KKT automatically.  Hyperparameter
+learning, Stackelberg games, and inverse optimisation — the dominant
+MPCC use cases — are bilevel by origin.  Users currently write the
+KKT by hand.
+
+API:
+
+```python
+mpcc = pympcc.bilevel.from_lower_level(
+    f_upper, vars_upper,
+    f_lower, vars_lower,
+    g_lower=None, h_lower=None,    # lower-level constraints
+)
+result = pympcc.solve(mpcc)
+```
+
+The emitter writes stationarity (`∇_y L = 0`), feasibility
+(`g_lower(x,y) ≤ 0`, `h_lower(x,y) = 0`), and the inequality
+complementarity pair (`λ ≥ 0 ⊥ −g_lower(x,y) ≥ 0`) directly into a
+`MPCCProblem`.  Composes with §4.5 (variable-paired
+complementarity).  No new dependencies; optional CVXPY DPP consumer
+later.
+
+Module: `pympcc/bilevel.py`.
+
+---
+
+---
+
+## 6. Robustness & production features
+
+Items surfaced by the commercial-grade gap analysis that were not on the
+original roadmap.  Lower priority than §2–5 but relevant before a 1.0 release.
+
+### 6.1. Parallel multistart — (S)
+
+`pympcc.multistart` currently runs starts sequentially.  Wrap the inner
+loop with `concurrent.futures.ProcessPoolExecutor` behind a
+`n_jobs` parameter (default ``1`` = sequential, ``-1`` = all CPUs).
+Each worker receives a deep-copied problem and a perturbed `x0`.  The
+`MultiStartResult` aggregates results as futures complete.
+
+Caveat: cyipopt / IPOPT must be fork-safe or use "spawn" start method;
+test on macOS where fork is restricted.
+
+Module: extend `pympcc/multistart.py`.  Tests: `tests/test_multistart.py`.
+
+### 6.2. Condition-number diagnostics at x* — (S)
+
+After a solve, report:
+
+* **Constraint Jacobian condition number** `κ(J_active)` — rank + condition
+  of the active-constraint Jacobian (already assembled for §2.1 LICQ check).
+* **Reduced Hessian condition estimate** — diagonal scaling from IPOPT's
+  linear solver (MA57/MA27 pivot sizes) when available.
+
+Surface as `result.jac_condition: float | None` and
+`result.hessian_condition_estimate: float | None`.  Neither blocks any
+downstream feature; purely diagnostic.
+
+Module: extension to `pympcc/_diagnostics.py`.
+
+### 6.3. Time limit with feasible incumbent — (S)
+
+IPOPT's `max_cpu_secs` already stops the inner solve, but pympcc returns
+whatever IPOPT had at that point without marking it as an "incumbent".
+Wrap `MPCCSolver.solve()` with a `time_limit` parameter:
+
+* Track the best feasible iterate seen across outer iterations
+  (via the per-iteration callback).
+* When `time_limit` is reached, stop the outer loop and return the best
+  incumbent rather than the incomplete current iterate.
+* `result.time_limit_hit: bool` flag for downstream detection.
+
+Module: extension to `pympcc/solver.py`.
+
+### 6.4. CUTEst / AMPL model library benchmark — (M)
+
+Extend `pympcc.benchmarks` beyond the current 8-problem MacMPEC subset:
+
+* **CUTEst**: use `pycutest` (Python CUTEst wrapper) to load the MPCC
+  problems from the full CUTEst library (~50 complementarity problems).
+* **AMPL MacMPEC**: all ~150 problems via the AMPL Python API or pre-parsed
+  `.nl` files.
+
+Output: Leyffer-style results table (problem, strategy, f_opt_gap,
+comp_residual, CQ_class, stationarity, n_iter, time) for paper figures.
+
+CLI: `python -m pympcc.benchmarks.cutest --strategy scholtes`.
 
 ---
 

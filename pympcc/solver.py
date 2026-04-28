@@ -4,8 +4,12 @@ from __future__ import annotations
 import logging
 from typing import Callable, Literal, Optional, Union
 
+import numpy as np
+
+from ._autoscale import autoscale_comp_pairs as _autoscale_comp_pairs
 from ._kernels import HAS_NUMBA
 from ._diagnostics import classify_cq as _classify_cq
+from ._sosc import sosc_check as _sosc_check
 from ._presolve import PresolveMap, presolve as _presolve
 from ._stationarity import verify_b_stationarity as _verify_b_stat
 from .models import StructuredMPCC
@@ -165,7 +169,10 @@ class MPCCSolver:
         verbose: bool = False,
         presolve: bool = False,
         diagnostics: bool = False,
+        autoscale: bool = False,
         b_stat_max_biactive: int = 10,
+        tnlp_refine: bool = False,
+        tnlp_max_iter: int = 500,
         **strategy_options,
     ) -> None:
         if strategy not in _STRATEGIES:
@@ -196,6 +203,8 @@ class MPCCSolver:
             self.problem, self._presolve_map = _presolve(self.problem_orig)
         else:
             self.problem, self._presolve_map = self.problem_orig, None
+        if autoscale:
+            self._apply_autoscale()
         self.strategy_name = strategy
         self.backend = backend
         self.ipopt_options = {**_DEFAULT_IPOPT_OPTIONS, **(ipopt_options or {})}
@@ -217,6 +226,8 @@ class MPCCSolver:
             self._strategy._linear_solver_fn = linear_solver_fn
         self._diagnostics = diagnostics
         self._b_stat_max_biactive = b_stat_max_biactive
+        self._tnlp_refine = tnlp_refine
+        self._tnlp_max_iter = tnlp_max_iter
 
     def solve(self) -> MPCCResult:
         """Run the solver and return an :class:`MPCCResult`."""
@@ -234,10 +245,38 @@ class MPCCSolver:
             result = self._presolve_map.expand_result(result, self.problem_orig)
         if self._diagnostics:
             self._attach_diagnostics(result)
+        # Always populate per_pair_status from G, H (O(n_comp), no cost).
+        self._attach_per_pair_status(result)
+        if self._tnlp_refine:
+            self._attach_tnlp_refinement(result)
         return result
 
+    def _apply_autoscale(self) -> None:
+        """Populate ``problem.comp_G_scale`` / ``comp_H_scale`` from a probe.
+
+        Skips silently when either scale is already user-supplied so manual
+        scaling always wins.  When autoscale rescales at least one pair,
+        emits a one-line ``UserWarning`` reporting the count.
+        """
+        import warnings as _warnings
+        if (self.problem.comp_G_scale is not None
+                or self.problem.comp_H_scale is not None):
+            return
+        s_G, s_H = _autoscale_comp_pairs(self.problem)
+        n_rescaled = int(np.sum((s_G != 1.0) | (s_H != 1.0)))
+        if n_rescaled == 0:
+            return
+        self.problem.comp_G_scale = s_G
+        self.problem.comp_H_scale = s_H
+        _warnings.warn(
+            f"pympcc autoscale: rescaled {n_rescaled}/{self.problem.n_comp} "
+            "complementarity pair(s) to balance |G_i| / |H_i|.",
+            UserWarning,
+            stacklevel=3,
+        )
+
     def _attach_diagnostics(self, result: MPCCResult) -> None:
-        """Run §2.1 / §2.2 diagnostics on the original-space result."""
+        """Run §2.1 / §2.2 / §2.3 diagnostics on the original-space result."""
         cq = _classify_cq(result, self.problem_orig)
         result.cq = cq["cq"]
         result.cq_active_set_sizes = cq["active_set_sizes"]
@@ -247,6 +286,53 @@ class MPCCSolver:
         result.b_stationary = bs["status"]
         result.b_stationary_witness = bs["witness_branch"]
         result.b_stationary_min_descent = bs["min_descent"]
+        sc = _sosc_check(result, self.problem_orig)
+        result.sosc = sc["sosc"]
+        result.sosc_min_eigenvalue = sc["min_eigenvalue"]
+        result.sosc_skipped_reason = sc["skipped_reason"]
+
+    @staticmethod
+    def _attach_per_pair_status(result: MPCCResult) -> None:
+        """Populate ``result.per_pair_status`` from G, H values (§4.6).
+
+        Uses an adaptive threshold: ``max(sqrt(comp_residual), 1e-6)``
+        matching the biactive-detection heuristic in ``_infer_active_set``.
+        A flat 1e-6 cutoff misclassifies near-biactive points where both
+        G and H sit at O(sqrt(ε)) due to the relaxation barrier.
+        """
+        G = np.asarray(result.G)
+        H = np.asarray(result.H)
+        comp = float(np.max(np.abs(G * H))) if G.size else 0.0
+        # Slight upward slack (1 ppm) so that G≈H≈sqrt(comp) cases aren't
+        # rejected by a ULP-level floating-point boundary.
+        tol = max(np.sqrt(comp) * (1.0 + 1e-6), 1e-6)
+        status = []
+        for g, h in zip(G, H):
+            if g <= tol and h <= tol:
+                status.append("biactive")
+            elif g <= tol:
+                status.append("G_active")
+            elif h <= tol:
+                status.append("H_active")
+            else:
+                status.append("inactive")
+        result.per_pair_status = status
+
+    def _attach_tnlp_refinement(self, result: MPCCResult) -> None:
+        """Run §2.6 TNLP active-set refinement and populate ``result.tnlp_refined``."""
+        if not result.success:
+            return
+        from ._tnlp import run_tnlp_refinement as _tnlp
+        tnlp = _tnlp(
+            result,
+            self.problem_orig,
+            self._strategy,
+            max_iter=self._tnlp_max_iter,
+        )
+        result.tnlp_refined = tnlp
+        if tnlp.success:
+            result.mult_comp_G_mpcc = tnlp.mult_comp_G
+            result.mult_comp_H_mpcc = tnlp.mult_comp_H
 
 
 def solve(
@@ -259,7 +345,13 @@ def solve(
     verbose: bool = False,
     presolve: bool = False,
     diagnostics: bool = False,
+    autoscale: bool = False,
     b_stat_max_biactive: int = 10,
+    tnlp_refine: bool = False,
+    tnlp_max_iter: int = 500,
+    n_starts: int = 1,
+    perturb_scale: float = 0.1,
+    multistart_seed: int = 0,
     **strategy_options,
 ) -> MPCCResult:
     """
@@ -323,6 +415,27 @@ def solve(
 
         result = pympcc.solve(problem, ipopt_options={'print_level': 5})
     """
+    if n_starts > 1:
+        from .multistart import multistart as _multistart
+        return _multistart(
+            problem,
+            n_starts=n_starts,
+            perturb_scale=perturb_scale,
+            seed=multistart_seed,
+            strategy=strategy,
+            backend=backend,
+            ipopt_options=ipopt_options,
+            solver_options=solver_options,
+            callback=callback,
+            verbose=verbose,
+            presolve=presolve,
+            diagnostics=diagnostics,
+            autoscale=autoscale,
+            b_stat_max_biactive=b_stat_max_biactive,
+            tnlp_refine=tnlp_refine,
+            tnlp_max_iter=tnlp_max_iter,
+            **strategy_options,
+        )
     return MPCCSolver(
         _as_mpcc_problem(problem), strategy,
         backend=backend,
@@ -331,6 +444,9 @@ def solve(
         callback=callback, verbose=verbose,
         presolve=presolve,
         diagnostics=diagnostics,
+        autoscale=autoscale,
         b_stat_max_biactive=b_stat_max_biactive,
+        tnlp_refine=tnlp_refine,
+        tnlp_max_iter=tnlp_max_iter,
         **strategy_options,
     ).solve()

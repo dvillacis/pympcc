@@ -472,12 +472,24 @@ inline int run_solve(
     Ipopt::SmartPtr<Ipopt::IpoptApplication> app =
         IpoptApplicationFactory();
 
-    // Set options from Python dict
+    // Set options from Python dict.
+    //
+    // cyipopt accepts both ``str`` and ``bytes`` for keys and string values,
+    // and pympcc strategies pass through some bytes-typed entries verbatim, so
+    // we mirror that here.  Critically, when a key/value cannot be converted
+    // to UTF-8 we MUST PyErr_Clear() before continuing — leaking PyErr through
+    // the loop taints the very first IPOPT callback and surfaces far away as
+    // ``TypeError: bad argument type for built-in operation`` cascades.
     PyObject *key, *value;
     Py_ssize_t pos = 0;
+    auto as_utf8 = [](PyObject* o) -> const char* {
+        if (PyUnicode_Check(o)) return PyUnicode_AsUTF8(o);
+        if (PyBytes_Check(o))   return PyBytes_AsString(o);
+        return nullptr;
+    };
     while (PyDict_Next(options_dict, &pos, &key, &value)) {
-        const char* k = PyUnicode_AsUTF8(key);
-        if (!k) continue;
+        const char* k = as_utf8(key);
+        if (!k) { PyErr_Clear(); continue; }
         std::string ks(k);
         if (PyBool_Check(value)) {
             // bool before int check (bool is subclass of int)
@@ -489,11 +501,13 @@ inline int run_solve(
         } else if (PyFloat_Check(value)) {
             app->Options()->SetNumericValue(ks,
                 PyFloat_AsDouble(value), true, true);
-        } else if (PyUnicode_Check(value)) {
-            const char* vs = PyUnicode_AsUTF8(value);
-            if (vs)
-                app->Options()->SetStringValue(ks, std::string(vs),
-                                               true, true);
+        } else {
+            const char* vs = as_utf8(value);
+            if (vs) {
+                app->Options()->SetStringValue(ks, std::string(vs), true, true);
+            } else {
+                PyErr_Clear();
+            }
         }
     }
 

@@ -38,11 +38,11 @@ def _make_problem(g_val: float = 0.5, h_val: float = 0.5):
 
 class TestResolver:
     def test_clips_low(self):
-        # G*H = 1e-4 → resolver pins to lo=1e-1.
+        # G*H = 1e-4 → resolver pins to lo=1e-3.
         p = _make_problem(g_val=1e-2, h_val=1e-2)
         eps0, raw = BaseStrategy._resolve_auto_epsilon_0(p)
         assert raw == pytest.approx(1e-4)
-        assert eps0 == pytest.approx(1e-1)
+        assert eps0 == pytest.approx(1e-3)
 
     def test_clips_high(self):
         # G*H = 1e3 → resolver pins to hi=1.0.
@@ -69,7 +69,7 @@ class TestResolver:
         p = _make_problem(g_val=0.0, h_val=0.5)
         eps0, raw = BaseStrategy._resolve_auto_epsilon_0(p)
         assert raw == 0.0
-        assert eps0 == pytest.approx(1e-1)
+        assert eps0 == pytest.approx(1e-3)
 
 
 # ======================================================================= #

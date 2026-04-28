@@ -1,6 +1,6 @@
 [project]
 name = "pympcc"
-version = "0.3.0"
+version = "0.4.0"
 description = "Python solver for Mathematical Programs with Complementarity Constraints (MPCC) using IPOPT via cyipopt"
 readme = "README.md"
 license = { text = "MIT" }
@@ -27,9 +27,9 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/davidvillacis/pympcc"
-"Bug Tracker" = "https://github.com/davidvillacis/pympcc/issues"
-Changelog = "https://github.com/davidvillacis/pympcc/blob/main/CHANGELOG.md"
+Repository = "https://github.com/dvillacis/pympcc"
+"Bug Tracker" = "https://github.com/dvillacis/pympcc/issues"
+Changelog = "https://github.com/dvillacis/pympcc/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [

@@ -22,14 +22,18 @@ Quickstart
 >>> result.success    # convergence flag
 """
 
+from ._autoscale import autoscale_comp_pairs
 from ._diagnostics import active_sets, classify_cq
+from ._sosc import sosc_check
 from ._presolve import PresolveMap, presolve
 from ._stationarity import (
     classify_stationarity,
     compute_kkt_residual,
     verify_b_stationarity,
 )
+from ._tnlp import TNLPResult
 from .models import StructuredMPCC
+from .multistart import MultiStartResult, multistart
 from .problem import MPCCProblem
 from .result import IPOPTStatus, IterationInfo, MPCCResult, unscale_multipliers
 from .solver import MPCCSolver, solve
@@ -44,11 +48,16 @@ __all__ = [
     "solve",
     "active_sets",
     "classify_cq",
+    "sosc_check",
     "classify_stationarity",
     "compute_kkt_residual",
     "verify_b_stationarity",
     "unscale_multipliers",
     "presolve",
     "PresolveMap",
+    "autoscale_comp_pairs",
+    "multistart",
+    "MultiStartResult",
+    "TNLPResult",
 ]
-__version__ = "0.3.0"
+__version__ = "0.4.0"

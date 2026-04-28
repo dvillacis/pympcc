@@ -93,11 +93,34 @@ class MPCCProblem:
     n_comp: int
     x0: np.ndarray
     objective: Callable[[np.ndarray], float]
-    gradient: Union[Callable[[np.ndarray], np.ndarray], str]
-    comp_G: Callable[[np.ndarray], np.ndarray]
-    comp_G_jacobian: Union[Callable[[np.ndarray], np.ndarray], str]
-    comp_H: Callable[[np.ndarray], np.ndarray]
-    comp_H_jacobian: Union[Callable[[np.ndarray], np.ndarray], str]
+
+    # ------------------------------------------------------------------ #
+    # Complementarity callables.                                           #
+    # Either comp_G / comp_H must be provided, or all pairs may be        #
+    # declared via ``comp_var_pairs`` (see below), in which case both     #
+    # may be left as ``None``.  When a mix is used,                       #
+    # ``n_comp = n_base + len(comp_var_pairs)`` where ``n_base`` is       #
+    # inferred from the pair count of the base comp_G/comp_H.             #
+    # ------------------------------------------------------------------ #
+    comp_G: Optional[Callable[[np.ndarray], np.ndarray]] = None
+    comp_H: Optional[Callable[[np.ndarray], np.ndarray]] = None
+
+    # ------------------------------------------------------------------ #
+    # Derivative callables — required, but may be omitted when the       #
+    # ``derivatives`` keyword (see below) auto-fills them with ``"jax"`` #
+    # or ``"fd"`` sentinels.                                             #
+    # ------------------------------------------------------------------ #
+    gradient: Optional[Union[Callable[[np.ndarray], np.ndarray], str]] = None
+    comp_G_jacobian: Optional[Union[Callable[[np.ndarray], np.ndarray], str]] = None
+    comp_H_jacobian: Optional[Union[Callable[[np.ndarray], np.ndarray], str]] = None
+
+    # ------------------------------------------------------------------ #
+    # Default derivative source.  When ``"jax"`` (resp. ``"fd"``) every  #
+    # unset derivative field — gradient, every Jacobian — is             #
+    # auto-filled with the corresponding sentinel before resolution.     #
+    # User-supplied callables and explicit sentinels override.           #
+    # ------------------------------------------------------------------ #
+    derivatives: Optional[str] = None
 
     # ------------------------------------------------------------------ #
     # Variable bounds (default: unbounded)                                 #
@@ -180,6 +203,17 @@ class MPCCProblem:
     eq_jacobian_sparsity:     Optional[tuple] = None
 
     # ------------------------------------------------------------------ #
+    # Variable-paired complementarity (MCP form).                         #
+    # Each entry is (var_idx, h_fn) or (var_idx, h_fn, h_jac_fn).        #
+    # var_idx  — index j in [0, n); declares x[j] >= 0 as the G side.   #
+    # h_fn     — callable, h_fn(x) -> float; the H side.                 #
+    # h_jac_fn — callable, h_jac_fn(x) -> ndarray shape (n,); or None   #
+    #            to use forward finite differences for that row.          #
+    # xl[var_idx] is silently clamped to max(xl[var_idx], 0.0).          #
+    # ------------------------------------------------------------------ #
+    comp_var_pairs: Optional[list] = None
+
+    # ------------------------------------------------------------------ #
     # Optional per-pair diagonal rescaling for the complementarity block #
     # ------------------------------------------------------------------ #
     # When set, every strategy operates on (s_G * G, s_H * H) instead of #
@@ -212,9 +246,212 @@ class MPCCProblem:
             self.xu = np.full(self.n, np.inf)
         self.xl = np.asarray(self.xl, dtype=float)
         self.xu = np.asarray(self.xu, dtype=float)
-        self._resolve_jax_fields()   # must run before fd so "jax" sentinels are cleared
+        self._apply_derivatives_default()
+        # jax/fd resolution skips comp_G/H Jacobians when comp_G is None
+        # (they will be built by _normalize_var_pairs from the var-pair declarations).
+        self._resolve_jax_fields()
         self._resolve_fd_fields()
+        self._normalize_var_pairs()   # merges var-pairs into comp_G/H and builds Jacobians
+        self._check_derivatives_resolved()
         self._validate()
+
+    def _apply_derivatives_default(self) -> None:
+        """Auto-fill ``None`` derivative fields with the ``derivatives`` sentinel.
+
+        ``derivatives="jax"`` and ``derivatives="fd"`` provide a single
+        keyword opt-in into autodiff or finite differences for every
+        derivative field the user hasn't supplied.  Fields that already
+        hold a callable or an explicit sentinel are left untouched.
+        """
+        if self.derivatives is None:
+            return
+        if self.derivatives not in ("jax", "fd"):
+            raise ValueError(
+                f"derivatives must be None, 'jax', or 'fd'; got {self.derivatives!r}"
+            )
+        sentinel = self.derivatives
+
+        if self.gradient is None:
+            self.gradient = sentinel
+        if self.comp_G_jacobian is None:
+            self.comp_G_jacobian = sentinel
+        if self.comp_H_jacobian is None:
+            self.comp_H_jacobian = sentinel
+        if self.n_ineq > 0 and self.ineq_constraints is not None and self.ineq_jacobian is None:
+            self.ineq_jacobian = sentinel
+        if self.n_eq > 0 and self.eq_constraints is not None and self.eq_jacobian is None:
+            self.eq_jacobian = sentinel
+
+    def _normalize_var_pairs(self) -> None:
+        """Merge ``comp_var_pairs`` declarations into ``comp_G`` / ``comp_H`` and their Jacobians.
+
+        After this method runs:
+        * ``comp_G`` and ``comp_H`` are non-None callables.
+        * ``comp_G_jacobian`` is an exact callable (identity rows for var-pair block).
+        * ``comp_H_jacobian`` is a callable (user-provided or fd per var-pair row).
+        """
+        if not self.comp_var_pairs:
+            if self.comp_G is None or self.comp_H is None:
+                raise ValueError(
+                    "comp_G and comp_H are required when comp_var_pairs is not used"
+                )
+            return
+
+        from ._fd import fd_jacobian as _fd_jac
+
+        pairs = list(self.comp_var_pairs)
+        k = len(pairs)
+        n = self.n
+        h_fd = self.fd_h
+        h_mode = self.fd_mode
+
+        # Parse tuples: (var_idx, h_fn) or (var_idx, h_fn, h_jac_fn)
+        var_idxs: list[int] = []
+        h_fns: list = []
+        h_jac_fns: list = []  # None → build fd inline
+        for entry in pairs:
+            if len(entry) == 2:
+                vi, hf = entry
+                hj = None
+            elif len(entry) == 3:
+                vi, hf, hj = entry
+            else:
+                raise ValueError(
+                    "comp_var_pairs entries must be (var_idx, h_fn) or (var_idx, h_fn, h_jac_fn)"
+                )
+            if not (0 <= int(vi) < n):
+                raise ValueError(
+                    f"comp_var_pairs: var_idx {vi} is out of range [0, {n})"
+                )
+            var_idxs.append(int(vi))
+            h_fns.append(hf)
+            h_jac_fns.append(hj)
+
+        var_idx_arr = np.array(var_idxs, dtype=np.intp)
+
+        # Enforce lower bound >= 0 for each paired variable
+        for vi in var_idxs:
+            self.xl[vi] = max(self.xl[vi], 0.0)
+
+        # Build per-row H Jacobians (resolve fd now for any missing)
+        resolved_h_jac: list = []
+        for hf, hj in zip(h_fns, h_jac_fns):
+            if hj is not None:
+                resolved_h_jac.append(hj)
+            else:
+                def _scalar_fd(x, _f=hf, _h=h_fd, _m=h_mode):
+                    return _fd_jac(_f, 1, n, _h, _m)(x)[0]
+                resolved_h_jac.append(_scalar_fd)
+
+        if self.comp_G is None:
+            # All-var-pairs mode: every comp pair is declared via comp_var_pairs
+            if k != self.n_comp:
+                raise ValueError(
+                    f"comp_var_pairs has {k} entries but n_comp={self.n_comp}; "
+                    "when comp_G is None, len(comp_var_pairs) must equal n_comp"
+                )
+
+            def _G(x, _idx=var_idx_arr):
+                return np.asarray(x, dtype=float)[_idx]
+
+            def _H(x, _hfs=h_fns, _k=k):
+                return np.array([float(np.asarray(hf(x)).ravel()[0]) for hf in _hfs])
+
+            def _G_jac(x, _idx=var_idx_arr, _k=k, _n=n):
+                J = np.zeros((_k, _n))
+                J[np.arange(_k), _idx] = 1.0
+                return J
+
+            def _H_jac(x, _jfs=resolved_h_jac):
+                return np.stack([jf(x) for jf in _jfs], axis=0)
+
+            self.comp_G = _G
+            self.comp_H = _H
+            self.comp_G_jacobian = _G_jac
+            self.comp_H_jacobian = _H_jac
+
+        else:
+            # Mixed mode: base comp_G/comp_H + k var-pair rows appended at the end
+            n_base = self.n_comp - k
+            if n_base <= 0:
+                raise ValueError(
+                    f"comp_var_pairs has {k} entries but n_comp={self.n_comp}; "
+                    "mixed mode requires n_comp > len(comp_var_pairs) (at least one base pair)"
+                )
+
+            base_G = self.comp_G
+            base_H = self.comp_H
+            base_G_jac = self.comp_G_jacobian
+            base_H_jac = self.comp_H_jacobian
+
+            if not callable(base_G_jac):
+                raise ValueError(
+                    "Mixed comp_var_pairs requires comp_G_jacobian to be a resolved callable. "
+                    "Pass derivatives='fd', derivatives='jax', or supply comp_G_jacobian explicitly."
+                )
+            if not callable(base_H_jac):
+                raise ValueError(
+                    "Mixed comp_var_pairs requires comp_H_jacobian to be a resolved callable. "
+                    "Pass derivatives='fd', derivatives='jax', or supply comp_H_jacobian explicitly."
+                )
+
+            def _G(x, _bG=base_G, _idx=var_idx_arr):
+                return np.concatenate([
+                    np.asarray(_bG(x), dtype=float),
+                    np.asarray(x, dtype=float)[_idx],
+                ])
+
+            def _H(x, _bH=base_H, _hfs=h_fns):
+                return np.concatenate([
+                    np.asarray(_bH(x), dtype=float),
+                    np.array([float(np.asarray(hf(x)).ravel()[0]) for hf in _hfs]),
+                ])
+
+            def _G_jac(x, _bJac=base_G_jac, _idx=var_idx_arr, _k=k, _n=n):
+                base_rows = np.asarray(_bJac(x), dtype=float)
+                id_rows = np.zeros((_k, _n))
+                id_rows[np.arange(_k), _idx] = 1.0
+                return np.vstack([base_rows, id_rows])
+
+            def _H_jac(x, _bJac=base_H_jac, _jfs=resolved_h_jac):
+                base_rows = np.asarray(_bJac(x), dtype=float)
+                extra_rows = np.stack([jf(x) for jf in _jfs], axis=0)
+                return np.vstack([base_rows, extra_rows])
+
+            self.comp_G = _G
+            self.comp_H = _H
+            self.comp_G_jacobian = _G_jac
+            self.comp_H_jacobian = _H_jac
+
+    def _check_derivatives_resolved(self) -> None:
+        """Raise a clear error when a required derivative is still missing.
+
+        Runs after ``_resolve_jax_fields`` and ``_resolve_fd_fields`` so
+        any sentinel that survived resolution (e.g. JAX missing) has
+        already been reported.
+        """
+        missing: list[str] = []
+        if self.gradient is None or isinstance(self.gradient, str):
+            missing.append("gradient")
+        if self.comp_G_jacobian is None or isinstance(self.comp_G_jacobian, str):
+            missing.append("comp_G_jacobian")
+        if self.comp_H_jacobian is None or isinstance(self.comp_H_jacobian, str):
+            missing.append("comp_H_jacobian")
+        if self.n_ineq > 0 and (
+            self.ineq_jacobian is None or isinstance(self.ineq_jacobian, str)
+        ):
+            missing.append("ineq_jacobian")
+        if self.n_eq > 0 and (
+            self.eq_jacobian is None or isinstance(self.eq_jacobian, str)
+        ):
+            missing.append("eq_jacobian")
+        if missing:
+            raise ValueError(
+                f"Missing derivative callable(s): {missing}. "
+                "Pass each as a callable, set the field to 'jax' or 'fd', "
+                "or pass derivatives='jax' / derivatives='fd' to fill all "
+                "unset derivative fields at once."
+            )
 
     def _resolve_jax_fields(self) -> None:
         """Replace any ``"jax"`` sentinel with a JAX-autodiff callable."""
@@ -255,6 +492,9 @@ class MPCCProblem:
             if getattr(self, attr) != "jax":
                 continue
             fn = getattr(self, fn_attr)
+            # Defer comp_G/H Jacobian resolution to _normalize_var_pairs when comp_G is None
+            if fn is None and attr in ("comp_G_jacobian", "comp_H_jacobian"):
+                continue
             if fn is None or n_out == 0:
                 raise ValueError(
                     f"{attr}='jax' requires the corresponding function "
@@ -288,15 +528,19 @@ class MPCCProblem:
             self.gradient = fd_gradient(self.objective, self.n, h, mode)
             fd_used.append("gradient")
         if self.comp_G_jacobian == "fd":
-            self.comp_G_jacobian = fd_jacobian(
-                self.comp_G, self.n_comp, self.n, h, mode
-            )
-            fd_used.append("comp_G_jacobian")
+            if self.comp_G is not None:
+                self.comp_G_jacobian = fd_jacobian(
+                    self.comp_G, self.n_comp, self.n, h, mode
+                )
+                fd_used.append("comp_G_jacobian")
+            # else: comp_G is None (var-pairs only) — _normalize_var_pairs builds exact G Jac
         if self.comp_H_jacobian == "fd":
-            self.comp_H_jacobian = fd_jacobian(
-                self.comp_H, self.n_comp, self.n, h, mode
-            )
-            fd_used.append("comp_H_jacobian")
+            if self.comp_H is not None:
+                self.comp_H_jacobian = fd_jacobian(
+                    self.comp_H, self.n_comp, self.n, h, mode
+                )
+                fd_used.append("comp_H_jacobian")
+            # else: comp_H is None (var-pairs only) — _normalize_var_pairs builds H Jac (fd per row)
         if self.ineq_jacobian == "fd":
             if self.n_ineq == 0 or self.ineq_constraints is None:
                 raise ValueError(

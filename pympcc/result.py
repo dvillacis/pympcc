@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Optional
+from typing import Literal, Optional
 
 import numpy as np
 
 __all__ = ["IPOPTStatus", "IterationInfo", "MPCCResult", "unscale_multipliers"]
+
+PairStatus = Literal["G_active", "H_active", "biactive", "inactive"]
 
 
 class IPOPTStatus(IntEnum):
@@ -127,6 +130,28 @@ class MPCCResult:
     b_stationary: Optional[str] = None             # "B-stationary" | "not B-stationary" | "intractable" | "unknown"
     b_stationary_witness: Optional[tuple] = None   # branch chars where descent was found
     b_stationary_min_descent: Optional[float] = None
+    # Per-pair complementarity status.  Always populated by MPCCSolver.  Each
+    # entry is one of: "G_active" (G_i≈0, H_i>0), "H_active" (H_i≈0, G_i>0),
+    # "biactive" (both≈0), "inactive" (both>0 — infeasible, should not occur).
+    per_pair_status: Optional[list] = None
+    # MPCC-stationarity multipliers μ_G = −λ_G, μ_H = −λ_H (literature
+    # sign convention).  Populated when ``tnlp_refine=True`` from the TNLP
+    # active-set re-solve; None otherwise to avoid confusion with approximate
+    # relaxed-NLP multipliers.
+    mult_comp_G_mpcc: Optional[np.ndarray] = None
+    mult_comp_H_mpcc: Optional[np.ndarray] = None
+    # TNLP active-set refinement result (§2.6).  Populated when the solver is
+    # called with ``tnlp_refine=True``.
+    tnlp_refined: Optional[object] = None  # TNLPResult, typed as object to avoid circular import
+    # MPCC second-order sufficient conditions (§2.3).  Populated when the
+    # solver is invoked with ``diagnostics=True``.
+    # ``True``  — reduced Hessian is PD on the critical cone.
+    # ``False`` — at least one non-positive eigenvalue (not a strict local min).
+    # ``None``  — check skipped (non-converged, biactive pairs, or Hessian
+    #             unavailable); see ``sosc_skipped_reason``.
+    sosc: Optional[bool] = None
+    sosc_min_eigenvalue: Optional[float] = None
+    sosc_skipped_reason: Optional[str] = None
 
     def unscale_comp_multipliers(
         self,
@@ -144,6 +169,100 @@ class MPCCResult:
         s_H = self.comp_H_scale if self.comp_H_scale is not None else 1.0
         return s_G * mpcc_mult_G, s_H * mpcc_mult_H
 
+    def to_json(self) -> str:
+        """Serialize the result to a JSON string.
+
+        Arrays are converted to lists.  Fields that are ``None`` are included
+        as JSON ``null``.  The ``history`` list is omitted (use
+        ``summary(verbosity=2)`` for human-readable history).
+
+        Returns
+        -------
+        str
+            JSON-encoded result suitable for logging, benchmarking, or storage.
+        """
+        def _arr(a):
+            return a.tolist() if isinstance(a, np.ndarray) else a
+
+        d: dict = {
+            "obj": self.obj,
+            "success": self.success,
+            "status": self.status,
+            "message": self.message,
+            "strategy": self.strategy,
+            "comp_residual": self.comp_residual,
+            "comp_residual_mean": self.comp_residual_mean,
+            "stationarity": self.stationarity,
+            "kkt_residual": self.kkt_residual,
+            "x": _arr(self.x),
+            "G": _arr(self.G),
+            "H": _arr(self.H),
+            "per_pair_status": self.per_pair_status,
+            "mult_comp_G_mpcc": _arr(self.mult_comp_G_mpcc),
+            "mult_comp_H_mpcc": _arr(self.mult_comp_H_mpcc),
+            "cq": self.cq,
+            "cq_rank_deficit": self.cq_rank_deficit,
+            "b_stationary": self.b_stationary,
+            "solve_time": self.solve_time,
+        }
+        if self.tnlp_refined is not None:
+            tnlp = self.tnlp_refined
+            d["tnlp_refined"] = {
+                "success": tnlp.success,
+                "status": tnlp.status,
+                "obj": tnlp.obj,
+                "stationarity": tnlp.stationarity,
+                "kkt_residual": tnlp.kkt_residual,
+                "mult_comp_G": _arr(tnlp.mult_comp_G),
+                "mult_comp_H": _arr(tnlp.mult_comp_H),
+                "n_iter": tnlp.n_iter,
+                "solve_time": tnlp.solve_time,
+            }
+        return json.dumps(d)
+
+    def to_dataframe(self):
+        """Return a per-complementarity-pair :class:`pandas.DataFrame`.
+
+        Columns: ``pair``, ``G``, ``H``, ``GH``, ``status``, and (when
+        available from TNLP refinement) ``mu_G``, ``mu_H``.
+
+        Requires ``pandas``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per complementarity pair.
+
+        Raises
+        ------
+        ImportError
+            When ``pandas`` is not installed.
+        """
+        try:
+            import pandas as pd
+        except ImportError as exc:
+            raise ImportError(
+                "pandas is required for MPCCResult.to_dataframe(). "
+                "Install it with: pip install pandas"
+            ) from exc
+
+        rows = []
+        for i, (g, h) in enumerate(zip(self.G, self.H)):
+            row: dict = {
+                "pair": i,
+                "G": float(g),
+                "H": float(h),
+                "GH": float(g * h),
+                "status": (self.per_pair_status[i]
+                           if self.per_pair_status is not None else None),
+            }
+            if self.mult_comp_G_mpcc is not None:
+                row["mu_G"] = float(self.mult_comp_G_mpcc[i])
+            if self.mult_comp_H_mpcc is not None:
+                row["mu_H"] = float(self.mult_comp_H_mpcc[i])
+            rows.append(row)
+        return pd.DataFrame(rows)
+
     def __repr__(self) -> str:  # pragma: no cover
         kkt_str = (f", kkt_residual={self.kkt_residual:.3e}"
                    if self.kkt_residual is not None else "")
@@ -153,6 +272,133 @@ class MPCCResult:
             f"comp_residual_mean={self.comp_residual_mean:.3e}, "
             f"stationarity={self.stationarity!r}{kkt_str}, status={self.status})"
         )
+
+    def summary(self, verbosity: int = 1) -> str:
+        """Return a formatted summary of the result.
+
+        Parameters
+        ----------
+        verbosity : int
+            ``0`` — single-line headline.
+            ``1`` — multi-section block (default); shows objective, residuals,
+            stationarity, populated diagnostics, and performance.
+            ``2`` — also includes the per-iteration history table.
+        """
+        try:
+            status_name = IPOPTStatus(self.status).name
+        except ValueError:
+            status_name = "UNKNOWN"
+
+        if verbosity <= 0:
+            kkt = (f", kkt={self.kkt_residual:.2e}"
+                   if self.kkt_residual is not None else "")
+            return (
+                f"MPCCResult({self.strategy}): success={self.success}, "
+                f"obj={self.obj:.6g}, comp={self.comp_residual:.2e}{kkt}"
+            )
+
+        lines: list[str] = []
+        lines.append(
+            f"MPCCResult — strategy={self.strategy!r}, success={self.success}"
+        )
+        lines.append(f"  Status: {self.status} ({status_name}) — {self.message}")
+
+        lines.append("  Solution:")
+        lines.append(f"    objective       = {self.obj: .6e}")
+        lines.append(
+            f"    comp_residual   = {self.comp_residual:.3e} (max), "
+            f"{self.comp_residual_mean:.3e} (mean)"
+        )
+        if self.kkt_residual is not None:
+            lines.append(f"    KKT residual    = {self.kkt_residual:.3e}")
+
+        stat_lines: list[str] = []
+        if self.stationarity and self.stationarity != "unknown":
+            stat_lines.append(f"    class           = {self.stationarity}")
+        if self.cq is not None:
+            cq_extra = ""
+            if self.cq_rank_deficit is not None:
+                cq_extra = f" (rank deficit {self.cq_rank_deficit})"
+            stat_lines.append(f"    CQ              = {self.cq}{cq_extra}")
+        if self.b_stationary is not None:
+            bs_extra = ""
+            if self.b_stationary_min_descent is not None:
+                bs_extra = f" (min descent {self.b_stationary_min_descent:.3e})"
+            stat_lines.append(f"    B-stationary    = {self.b_stationary}{bs_extra}")
+        if stat_lines:
+            lines.append("  Stationarity:")
+            lines.extend(stat_lines)
+
+        if self.cq_active_set_sizes is not None:
+            sizes = self.cq_active_set_sizes
+            parts = [f"|I_{k}|={v}" for k, v in sizes.items()]
+            lines.append("  Active set:")
+            lines.append("    " + ", ".join(parts))
+
+        perf_lines: list[str] = []
+        if self.solve_time is not None:
+            perf_lines.append(f"    solve_time      = {self.solve_time:.3f}s")
+        if self.history:
+            n_outer = len(self.history)
+            n_ipopt = sum(it.n_ipopt_iter for it in self.history)
+            n_restoration = sum(it.restoration_iter_count for it in self.history)
+            restored = any(it.entered_restoration for it in self.history)
+            iters_str = f"    outer iters     = {n_outer} (IPOPT iters: {n_ipopt}"
+            if restored:
+                iters_str += f", restoration: {n_restoration}"
+            iters_str += ")"
+            perf_lines.append(iters_str)
+        if perf_lines:
+            lines.append("  Performance:")
+            lines.extend(perf_lines)
+
+        if self.cleanup_status is not None:
+            lines.append("  Cleanup:")
+            lines.append(
+                f"    accepted={self.cleanup_accepted}, "
+                f"status={self.cleanup_status}, "
+                f"obj={self.cleanup_obj:.6e}, "
+                f"n_iter={self.cleanup_n_iter}"
+            )
+
+        if self.per_pair_status is not None:
+            from collections import Counter
+            counts = Counter(self.per_pair_status)
+            parts = []
+            for key in ("G_active", "H_active", "biactive", "inactive"):
+                if counts[key]:
+                    parts.append(f"{key}={counts[key]}")
+            lines.append("  Complementarity pairs: " + ", ".join(parts))
+
+        if self.tnlp_refined is not None:
+            tnlp = self.tnlp_refined
+            lines.append("  TNLP Refinement:")
+            lines.append(
+                f"    success={tnlp.success}, "
+                f"status={tnlp.status}, "
+                f"obj={tnlp.obj:.6e}, "
+                f"stationarity={tnlp.stationarity!r}, "
+                f"n_iter={tnlp.n_iter}"
+            )
+            if tnlp.kkt_residual is not None:
+                lines.append(f"    KKT residual    = {tnlp.kkt_residual:.3e}")
+
+        if verbosity >= 2 and self.history:
+            lines.append("  Per-iteration history:")
+            lines.append(
+                "    k    epsilon      obj           comp_max     "
+                "kkt          n_iter   time"
+            )
+            for k, it in enumerate(self.history):
+                kkt_cell = (f"{it.kkt_residual:.3e}"
+                            if it.kkt_residual is not None else "    -    ")
+                lines.append(
+                    f"    {k:<4d} {it.epsilon:.3e}   {it.obj: .3e}   "
+                    f"{it.comp_residual:.3e}   {kkt_cell}   "
+                    f"{it.n_ipopt_iter:<8d} {it.iter_time:.3f}s"
+                )
+
+        return "\n".join(lines)
 
 
 def unscale_multipliers(
