@@ -277,7 +277,7 @@ class SmoothMinStrategy(_SmoothNCPBase):
         return 0.5 * (G + H - sq)
 
     @staticmethod
-    def _phi_grad_coeffs(  # type: ignore[override]
+    def _phi_grad_coeffs(
         G: np.ndarray,
         H: np.ndarray,
         eps: float,

@@ -579,24 +579,24 @@ class MPCCProblem:
                 tail_H_nnz = int(row_sizes.sum())
                 G_vals_tail_const = np.ones(k)
 
-                def _G_jac_sparse(x, _bJac=base_G_jac, _tail=G_vals_tail_const,
-                                  _nb=n_base_G):  # type: ignore[misc]
+                def _G_jac_sparse_mixed(x, _bJac=base_G_jac, _tail=G_vals_tail_const,
+                                        _nb=n_base_G):
                     out = np.empty(_nb + _tail.size)
                     out[:_nb] = np.asarray(_bJac(x), dtype=float).ravel()
                     out[_nb:] = _tail
                     return out
 
-                def _H_jac_sparse(x, _bJac=base_H_jac, _jfs=resolved_h_jac,
-                                  _off=row_offsets, _nb=n_base_H,
-                                  _tail_nnz=tail_H_nnz):  # type: ignore[misc]
+                def _H_jac_sparse_mixed(x, _bJac=base_H_jac, _jfs=resolved_h_jac,
+                                        _off=row_offsets, _nb=n_base_H,
+                                        _tail_nnz=tail_H_nnz):
                     out = np.empty(_nb + _tail_nnz)
                     out[:_nb] = np.asarray(_bJac(x), dtype=float).ravel()
                     for i, jf in enumerate(_jfs):
                         out[_nb + _off[i]:_nb + _off[i + 1]] = jf(x)
                     return out
 
-                self.comp_G_jacobian = _G_jac_sparse
-                self.comp_H_jacobian = _H_jac_sparse
+                self.comp_G_jacobian = _G_jac_sparse_mixed
+                self.comp_H_jacobian = _H_jac_sparse_mixed
                 self.comp_G_jacobian_sparsity = (G_rows_arr, G_cols_arr)
                 self.comp_H_jacobian_sparsity = (H_rows_arr, H_cols_arr)
             else:

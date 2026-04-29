@@ -481,11 +481,17 @@ class TestSparseVarPairs:
 
     @pytest.mark.parametrize("strategy", ["scholtes", "smoothing", "lin_fukushima"])
     def test_sparse_solve_matches_manual(self, strategy):
-        """Sparse var-pair form solves to the same optimum as the manual sparse form."""
+        """Sparse var-pair form solves to the same optimum as the manual sparse form.
+
+        Uses an objective with a unique MPCC optimum at x=(2, 0) (obj=1) so
+        the manual and var-pair formulations cannot diverge into different
+        local minima across platforms / cyipopt versions.
+        """
+        x0 = np.array([0.5, 0.5])
         manual = MPCCProblem(
-            n=2, n_comp=1, x0=np.array([0.5, 0.5]),
-            objective=lambda x: (x[0] - 1.0)**2 + (x[1] - 1.0)**2,
-            gradient=lambda x: np.array([2*(x[0]-1), 2*(x[1]-1)]),
+            n=2, n_comp=1, x0=x0,
+            objective=lambda x: (x[0] - 2.0)**2 + (x[1] + 1.0)**2,
+            gradient=lambda x: np.array([2*(x[0]-2), 2*(x[1]+1)]),
             comp_G=lambda x: np.array([x[0]]),
             comp_H=lambda x: np.array([x[1]]),
             comp_G_jacobian=lambda x: np.array([1.0]),
@@ -493,7 +499,14 @@ class TestSparseVarPairs:
             comp_G_jacobian_sparsity=(np.array([0]), np.array([0])),
             comp_H_jacobian_sparsity=(np.array([0]), np.array([1])),
         )
-        sparse = _simple_problem_var_pairs_sparse()
+        sparse = MPCCProblem(
+            n=2, n_comp=1, x0=x0,
+            objective=lambda x: (x[0] - 2.0)**2 + (x[1] + 1.0)**2,
+            gradient=lambda x: np.array([2*(x[0]-2), 2*(x[1]+1)]),
+            comp_var_pairs=[
+                (0, lambda x: np.array([x[1]]), lambda x: np.array([1.0]), [1]),
+            ],
+        )
         rm = pympcc.solve(manual, strategy=strategy)
         rs = pympcc.solve(sparse, strategy=strategy)
         assert rm.success and rs.success
