@@ -9,6 +9,60 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+**AMPL `.nl` reader (§6.4)**
+- New `pympcc.frontend.ampl` module — a self-contained text-format `.nl`
+  reader that produces an `MPCCProblem` directly.  No external AMPL
+  runtime or solver SDK required.
+- `from_nl(path)` — read an AMPL text-format `.nl` file and return an
+  `MPCCProblem`.  Complementarity constraints (encoded via bound-type-5
+  in the `b` segment, the AMPL/MacMPEC convention) route into the bulk
+  MCP form (`comp_var_pairs_bulk`).  Equality and inequality constraints
+  are split based on the `r` segment bound types.
+- Header parser (`parse_header`) covers the 10 fixed numeric lines plus
+  the optional suffix-counts line; binary `.nl` is rejected with a clear
+  error.
+- Body-segment parser (`parse_body`) handles `C`, `O`, `b`, `r`, `k`,
+  `J`, `G`, `S`, `x`, `d` segments; defined variables (`V`), logical
+  constraints (`L`), and imported functions (`F`) raise a clear error.
+- Op-tree reader (`_read_optree`) handles the ~30 AMPL operators
+  MacMPEC uses (binary arithmetic `o0`–`o5`, `o27` atan2, transcendentals
+  `o37`–`o52`, `o53` sumlist, `o76` square); unsupported ops raise
+  `NLParseError` with the op code in the message.
+- Op-tree evaluation (`eval_value`) and forward-mode AD (`eval_grad`)
+  walk the parsed tree; gradients verified against central-finite-
+  differences on randomized expressions.
+- 55 new tests in `tests/test_ampl_reader.py` covering header parsing,
+  body segments, op-tree recursion, evaluator correctness, gradient
+  matches against finite differences, and an end-to-end round-trip
+  (hand-authored 2-variable MPCC → `pympcc.solve` → unique optimum
+  recovered).
+
+**MacMPEC `.nl` fixtures + benchmark CLI**
+- Hand-authored `.nl` fixtures for `simple`, `kth1`, `ralph1` under
+  `tests/fixtures/nl/`; each is parsed via `from_nl` and parity-tested
+  against its analytical `ProblemSpec` counterpart in
+  `pympcc.benchmarks._problems`.
+- New helper `pympcc.benchmarks._nl_loader.load_nl_directory()` scans a
+  directory of `.nl` files and produces `ProblemSpec` records by joining
+  on stem against the registry (`f_opt`/tolerances are reused).
+- `python -m pympcc.benchmarks.macmpec --from-nl <dir>` runs the
+  benchmark suite against an `.nl` directory instead of the built-in
+  Python registry; combinable with `--problems` to filter by name.
+- `--skip <names>` flag on the benchmark CLI to exclude specific
+  problems (useful for skipping large MCPs whose per-row Python-callable
+  dispatch makes them currently impractical).
+
+### Fixed
+
+- `from_nl()` now correctly populates `n_eq` and `n_ineq` on the
+  returned `MPCCProblem`.  Previously the equality and inequality
+  callables were built but the row counts defaulted to 0, so all general
+  constraints were silently dropped from the NLP — affected ~12
+  MacMPEC problems (`bard3`, `ex9.1.x`, `bilevel3`, etc.) that appeared
+  to "solve" to unbounded objectives.
+
 ---
 
 ## [0.4.3] - 2026-04-29

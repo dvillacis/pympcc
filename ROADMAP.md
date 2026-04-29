@@ -649,19 +649,52 @@ Wrap `MPCCSolver.solve()` with a `time_limit` parameter:
 
 Module: extension to `pympcc/solver.py`.
 
-### 6.4. CUTEst / AMPL model library benchmark — (M)
+### 6.4. CUTEst / AMPL model library benchmark — (M) · *in progress*
 
-Extend `pympcc.benchmarks` beyond the current 8-problem MacMPEC subset:
+Extend `pympcc.benchmarks` beyond the current 13-problem MacMPEC subset.
 
-* **CUTEst**: use `pycutest` (Python CUTEst wrapper) to load the MPCC
-  problems from the full CUTEst library (~50 complementarity problems).
-* **AMPL MacMPEC**: all ~150 problems via the AMPL Python API or pre-parsed
-  `.nl` files.
+**AMPL `.nl` reader** (in progress) — :mod:`pympcc.frontend.ampl` — a
+self-contained text-format ``.nl`` parser, no external runtime deps.
+Operator coverage targets the ~30 ops MacMPEC uses; expressions are
+walked via reverse-mode AD over the parsed op-tree (no JAX dependency).
+
+Staging plan:
+
+1. ✅ Header parser (`parse_header`), op-tree reader (`_read_optree`),
+   `_TokenStream` infrastructure.
+2. ✅ Body-segment parsers (`C`, `O`, `b`, `r`, `k`, `J`, `G`, `S`,
+   `x`, `d`); bound-type-5 in the ``b`` segment carries the
+   complementarity pair `(var → constraint)` mapping used by AMPL/MacMPEC.
+3. ✅ Forward op-tree evaluator (`eval_value`) + forward-mode AD
+   (`eval_grad`); op-trees in `.nl` are typically narrow so forward-mode
+   matches reverse-mode performance without the bookkeeping.
+4. ✅ `from_nl(path) -> MPCCProblem` builder; complementarity rows
+   route into `comp_var_pairs_bulk` (vectorised MCP form, §4.5).
+   Verified end-to-end: hand-authored `.nl` → `pympcc.solve()` →
+   converges to the unique global optimum.
+5. ✅ Three hand-authored `.nl` fixtures (`simple`, `kth1`, `ralph1`)
+   under `tests/fixtures/nl/`, parity-tested against
+   :mod:`pympcc.benchmarks._problems`; loader at
+   :func:`pympcc.benchmarks._nl_loader.load_nl_directory`; CLI flag
+   `python -m pympcc.benchmarks.macmpec --from-nl <dir>` lands the
+   `.nl`-driven benchmark path.
+
+Next steps (open): generate the remaining ~150 MacMPEC ``.nl`` fixtures
+one-time offline via AMPL and drop them into a separate fixture dir;
+the loader + CLI already handle arbitrary directories.
+
+Out of scope for the first ship: binary `.nl` format, defined functions
+(``f<N>``), piecewise-linear terms (``o63``), AMPL extensions.
+
+**CUTEst** (deferred) — `pycutest` requires the CUTEST/SIFDECODE/MASTSIF
+runtime *and* per-problem MPCC pair-mapping (CUTEst itself doesn't tag
+complementarity structure).  Re-evaluate once the `.nl` path lands and
+the benchmark suite is at ~50 problems.
 
 Output: Leyffer-style results table (problem, strategy, f_opt_gap,
 comp_residual, CQ_class, stationarity, n_iter, time) for paper figures.
 
-CLI: `python -m pympcc.benchmarks.cutest --strategy scholtes`.
+CLI (planned): `python -m pympcc.benchmarks.macmpec --from-nl path/`.
 
 ---
 

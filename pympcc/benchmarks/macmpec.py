@@ -278,6 +278,10 @@ def _parse() -> argparse.Namespace:
             f"Available: {', '.join(PROBLEM_NAMES)}."
         ),
     )
+    p.add_argument(
+        "--skip", default=None,
+        help="Comma-separated list of problem names to exclude.",
+    )
     p.add_argument("--max-iter", type=int, default=3000, dest="max_iter",
                    help="IPOPT max iterations per NLP solve.")
     p.add_argument("--tol", type=float, default=1e-8,
@@ -286,6 +290,15 @@ def _parse() -> argparse.Namespace:
                    help="Save results to a CSV file.")
     p.add_argument("--quiet", action="store_true",
                    help="Suppress per-solve progress lines.")
+    p.add_argument(
+        "--from-nl", default=None, metavar="DIR", dest="from_nl",
+        help=(
+            "Load problems from a directory of AMPL .nl files instead of the "
+            "built-in registry.  Each <name>.nl is matched against the "
+            "registry by stem to recover f_opt and tolerances; unknown names "
+            "are skipped."
+        ),
+    )
     return p.parse_args()
 
 
@@ -298,7 +311,23 @@ def main() -> None:
             print(f"Unknown strategy {s!r}. Choose from: {', '.join(_ALL_STRATEGIES)}")
             sys.exit(1)
 
-    if args.problems:
+    skip_set = (
+        {n.strip() for n in args.skip.split(",")} if args.skip else set()
+    )
+
+    if args.from_nl:
+        from ._nl_loader import load_nl_directory
+        only = (
+            {n.strip() for n in args.problems.split(",")}
+            if args.problems else None
+        )
+        problems = load_nl_directory(args.from_nl, only=only)
+        if skip_set:
+            problems = [p for p in problems if p.name not in skip_set]
+        if not problems:
+            print(f"No matching .nl fixtures found in {args.from_nl}")
+            sys.exit(1)
+    elif args.problems:
         names = [n.strip() for n in args.problems.split(",")]
         unknown = [n for n in names if n not in PROBLEM_NAMES]
         if unknown:
@@ -308,6 +337,9 @@ def main() -> None:
         problems = [PROBLEM_NAMES[n] for n in names]
     else:
         problems = list(ALL_PROBLEMS)
+
+    if skip_set and not args.from_nl:
+        problems = [p for p in problems if p.name not in skip_set]
 
     import datetime
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
