@@ -21,7 +21,7 @@ analysis.  Complete each tier before starting the next.
 | 3 | SOSC — second-order sufficient conditions | §2.3 | M | ✅ |
 | 4 | Variable-paired complementarity (MCP form) | §4.5 | M | ✅ |
 | 5 | Bilevel KKT-emitter frontend | §5.4 | M | planned |
-| 6 | NCP-function reformulation menu | §3.5 | M | planned |
+| 6 | NCP-function reformulation menu | §3.5 | M | ✅ |
 | 7 | MacMPEC full benchmark runner (150 problems) | §4.7 | S | ✅ |
 | 8 | Branch-and-bound (global MPCC) | §3.1 | L | deferred |
 
@@ -345,7 +345,7 @@ to Scholtes / smoothing when those stall on highly degenerate problems.
 
 Module: `pympcc/strategies/elastic.py`.
 
-### 3.5. NCP-function reformulation menu — (M) · *priority 6*
+### 3.5. NCP-function reformulation menu — (M) · *priority 6* ✅
 
 GAMS-NLPEC ships ~12 reformulations as switches.  pympcc has 6;
 adding the most-cited remaining NCP functions makes the package a
@@ -362,7 +362,7 @@ Targets:
 Each lands as its own thin strategy class reusing the smoothing
 ε-continuation harness.  No new infrastructure.
 
-Module: `pympcc/strategies/ncp_*.py`.
+Module: `pympcc/strategies/ncp.py` — `SmoothMinStrategy`, `ChenChenKanzowStrategy`, `KanzowSchwartzStrategy`. ✅ Shipped in 0.4.2.
 
 ### 3.6. Adaptive penalty escalation — (S)
 

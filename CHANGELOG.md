@@ -7,6 +7,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.4.2] - 2026-04-28
+
+### Added
+
+**NCP-function reformulation menu (§3.5)**
+- `SmoothMinStrategy` (`strategy="smooth_min"`) — smoothed min-NCP:
+  `φ_ε(G,H) = ½(G+H−√((G−H)²+4ε²)) = 0`
+- `ChenChenKanzowStrategy` (`strategy="chen_chen_kanzow"`) — convex combination of
+  Fischer-Burmeister and inner-product: `φ_{λ,ε}(G,H) = λ·φ_FB,ε(G,H) + (1−λ)·G·H = 0`;
+  parameter `lam ∈ (0,1]` (default 0.5)
+- `KanzowSchwartzStrategy` (`strategy="kanzow_schwartz"`) — one-parameter FB family:
+  `φ_{λ,ε}(G,H) = G+H−√(G²+H²+2λGH+ε²) = 0`; parameter `lam ∈ [0,1)` (default 0.5)
+- All three inherit `_SmoothNCPBase` (in `pympcc/strategies/ncp.py`) which reuses the
+  ε-continuation harness from `SmoothingStrategy`; dense and sparse Jacobian paths both
+  supported via the generic `eval_weighted_union` kernel
+- MPCC multipliers recovered via `μ_G = λ_G + α⊙λ_φ`, `μ_H = λ_H + β⊙λ_φ`
+- 43 new tests in `tests/test_ncp_strategies.py`
+
+---
+
 ## [0.4.1] - 2026-04-28
 
 ### Fixed

@@ -18,6 +18,11 @@ from .result import IPOPTStatus, IterationInfo, MPCCResult
 from .strategies.augmented_lagrangian import AugmentedLagrangianStrategy
 from .strategies.direct import DirectStrategy
 from .strategies.lin_fukushima import LinFukushimaStrategy
+from .strategies.ncp import (
+    ChenChenKanzowStrategy,
+    KanzowSchwartzStrategy,
+    SmoothMinStrategy,
+)
 from .strategies.scholtes import ScholtesStrategy
 from .strategies.slack import SlackStrategy
 from .strategies.smoothing import SmoothingStrategy
@@ -37,6 +42,7 @@ def _as_mpcc_problem(problem: ProblemLike) -> MPCCProblem:
 StrategyName = Literal[
     "direct", "scholtes", "smoothing", "lin_fukushima",
     "augmented_lagrangian", "slack",
+    "smooth_min", "chen_chen_kanzow", "kanzow_schwartz",
 ]
 
 _STRATEGIES = {
@@ -46,6 +52,9 @@ _STRATEGIES = {
     "lin_fukushima": LinFukushimaStrategy,
     "augmented_lagrangian": AugmentedLagrangianStrategy,
     "slack": SlackStrategy,
+    "smooth_min": SmoothMinStrategy,
+    "chen_chen_kanzow": ChenChenKanzowStrategy,
+    "kanzow_schwartz": KanzowSchwartzStrategy,
 }
 
 _log = logging.getLogger("pympcc")
