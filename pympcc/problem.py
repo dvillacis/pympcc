@@ -214,6 +214,19 @@ class MPCCProblem:
     comp_var_pairs: Optional[list] = None
 
     # ------------------------------------------------------------------ #
+    # Bulk variable-paired complementarity (MCP form, vectorized).       #
+    # Use this for large MCPs (k >= 1e3) to avoid Python per-row dispatch.#
+    # 4-tuple: (var_idxs, h_bulk_fn, h_bulk_jac_fn, h_bulk_jac_sparsity) #
+    #   var_idxs           — ndarray (k,) of int; declares                #
+    #                        x[var_idxs[i]] >= 0  ⊥  h_bulk_fn(x)[i] >= 0 #
+    #   h_bulk_fn          — x -> ndarray (k,); single vectorized call.   #
+    #   h_bulk_jac_fn      — x -> ndarray (nnz,); flat sparse values.     #
+    #   h_bulk_jac_sparsity — (rows, cols) of the H block, k rows total.  #
+    # Mutually exclusive with comp_var_pairs. xl[var_idxs] clamped to 0.  #
+    # ------------------------------------------------------------------ #
+    comp_var_pairs_bulk: Optional[tuple] = None
+
+    # ------------------------------------------------------------------ #
     # Optional per-pair diagonal rescaling for the complementarity block #
     # ------------------------------------------------------------------ #
     # When set, every strategy operates on (s_G * G, s_H * H) instead of #
@@ -289,7 +302,28 @@ class MPCCProblem:
         * ``comp_G`` and ``comp_H`` are non-None callables.
         * ``comp_G_jacobian`` is an exact callable (identity rows for var-pair block).
         * ``comp_H_jacobian`` is a callable (user-provided or fd per var-pair row).
+
+        Three entry forms are accepted:
+
+        * ``(var_idx, h_fn)`` — fd dense row (current default).
+        * ``(var_idx, h_fn, h_jac_fn)`` — dense row; ``h_jac_fn(x) -> ndarray (n,)``.
+        * ``(var_idx, h_fn, h_jac_fn, h_cols)`` — sparse row; ``h_jac_fn(x)``
+          returns only the values at the columns ``h_cols``.
+
+        When **all** entries use the 4-tuple sparse form, ``comp_G_jacobian`` and
+        ``comp_H_jacobian`` are emitted as values-only callbacks and the
+        corresponding ``*_jacobian_sparsity`` patterns are auto-set (unless
+        already supplied). 2-/3-tuple and 4-tuple entries cannot be mixed in
+        the same list.
         """
+        if self.comp_var_pairs_bulk is not None:
+            if self.comp_var_pairs:
+                raise ValueError(
+                    "comp_var_pairs and comp_var_pairs_bulk are mutually exclusive"
+                )
+            self._apply_var_pairs_bulk()
+            return
+
         if not self.comp_var_pairs:
             if self.comp_G is None or self.comp_H is None:
                 raise ValueError(
@@ -305,19 +339,37 @@ class MPCCProblem:
         h_fd = self.fd_h
         h_mode = self.fd_mode
 
-        # Parse tuples: (var_idx, h_fn) or (var_idx, h_fn, h_jac_fn)
+        # Parse tuples: 2-, 3-, or 4-tuple forms.
         var_idxs: list[int] = []
         h_fns: list = []
-        h_jac_fns: list = []  # None → build fd inline
+        h_jac_fns: list = []   # None → build fd inline
+        h_cols_list: list = []  # None for dense rows; ndarray of intp for sparse rows
+        n_sparse = 0
         for entry in pairs:
             if len(entry) == 2:
                 vi, hf = entry
                 hj = None
+                hc = None
             elif len(entry) == 3:
                 vi, hf, hj = entry
+                hc = None
+            elif len(entry) == 4:
+                vi, hf, hj, hc = entry
+                if hj is None:
+                    raise ValueError(
+                        "comp_var_pairs 4-tuple form requires h_jac_fn (3rd element); "
+                        "use 2-tuple form for fd"
+                    )
+                hc = np.asarray(hc, dtype=np.intp).ravel()
+                if hc.size > 0 and (hc.min() < 0 or hc.max() >= n):
+                    raise ValueError(
+                        f"comp_var_pairs: h_cols entries must be in [0, {n})"
+                    )
+                n_sparse += 1
             else:
                 raise ValueError(
-                    "comp_var_pairs entries must be (var_idx, h_fn) or (var_idx, h_fn, h_jac_fn)"
+                    "comp_var_pairs entries must be (var_idx, h_fn), "
+                    "(var_idx, h_fn, h_jac_fn), or (var_idx, h_fn, h_jac_fn, h_cols)"
                 )
             if not (0 <= int(vi) < n):
                 raise ValueError(
@@ -326,6 +378,14 @@ class MPCCProblem:
             var_idxs.append(int(vi))
             h_fns.append(hf)
             h_jac_fns.append(hj)
+            h_cols_list.append(hc)
+
+        if 0 < n_sparse < k:
+            raise ValueError(
+                "comp_var_pairs entries must be all-sparse (4-tuple) or all-dense "
+                f"(2-/3-tuple); got {n_sparse} sparse and {k - n_sparse} dense"
+            )
+        sparse_mode = (n_sparse == k)
 
         var_idx_arr = np.array(var_idxs, dtype=np.intp)
 
@@ -334,7 +394,21 @@ class MPCCProblem:
         for vi in var_idxs:
             self.xl[vi] = max(self.xl[vi], 0.0)
 
-        # Build per-row H Jacobians (resolve fd now for any missing)
+        # Guard the fd fallback at scale: fd evaluates h_fn ~n+1 times per row
+        # per Jacobian call.  At k=1e4, n=1e3 that's 1e7 user calls per Jacobian
+        # — typically 1000x slower than supplying h_jac_fn explicitly.
+        n_fd_rows = sum(1 for hj in h_jac_fns if hj is None)
+        if n_fd_rows > 0 and (n_fd_rows * (n + 1) > 10_000_000):
+            raise ValueError(
+                f"comp_var_pairs has {n_fd_rows} entries with finite-difference "
+                f"H Jacobians and n={n}; this would evaluate h_fn ~"
+                f"{n_fd_rows * (n + 1):_} times per Jacobian call. "
+                "Pass h_jac_fn explicitly (3-tuple form), use sparse 4-tuple "
+                "form, or use comp_var_pairs_bulk for vectorized MCPs."
+            )
+
+        # Build per-row H Jacobians (resolve fd now for any missing — fd is only
+        # reachable from 2-tuple form, which is dense by definition)
         resolved_h_jac: list = []
         for hf, hj in zip(h_fns, h_jac_fns):
             if hj is not None:
@@ -343,6 +417,22 @@ class MPCCProblem:
                 def _scalar_fd(x, _f=hf, _h=h_fd, _m=h_mode):
                     return _fd_jac(_f, 1, n, _h, _m)(x)[0]
                 resolved_h_jac.append(_scalar_fd)
+
+        # One-shot construction-time validation for sparse-mode rows: each
+        # h_jac_fn(x0) must return exactly len(h_cols) values.  Caught here
+        # so the per-callback hot path is lean (no per-row size check).
+        if sparse_mode:
+            for i, (jf, hc) in enumerate(zip(resolved_h_jac, h_cols_list)):
+                vals = np.asarray(jf(self.x0)).ravel()
+                if vals.size != hc.size:
+                    raise ValueError(
+                        f"comp_var_pairs row {i}: h_jac_fn returned "
+                        f"{vals.size} values but h_cols has {hc.size}"
+                    )
+
+        # ------------------------------------------------------------------
+        # Common comp_G / comp_H value callables (identical for sparse/dense).
+        # ------------------------------------------------------------------
 
         if self.comp_G is None:
             # All-var-pairs mode: every comp pair is declared via comp_var_pairs
@@ -356,20 +446,57 @@ class MPCCProblem:
                 return np.asarray(x, dtype=float)[_idx]
 
             def _H(x, _hfs=h_fns, _k=k):
-                return np.array([float(np.asarray(hf(x)).ravel()[0]) for hf in _hfs])
-
-            def _G_jac(x, _idx=var_idx_arr, _k=k, _n=n):
-                J = np.zeros((_k, _n))
-                J[np.arange(_k), _idx] = 1.0
-                return J
-
-            def _H_jac(x, _jfs=resolved_h_jac):
-                return np.stack([jf(x) for jf in _jfs], axis=0)
+                out = np.empty(_k)
+                for i, hf in enumerate(_hfs):
+                    out[i] = np.asarray(hf(x)).ravel()[0]
+                return out
 
             self.comp_G = _G
             self.comp_H = _H
-            self.comp_G_jacobian = _G_jac
-            self.comp_H_jacobian = _H_jac
+
+            if sparse_mode:
+                G_rows_arr = np.arange(k, dtype=np.intp)
+                G_cols_arr = var_idx_arr.copy()
+                H_row_blocks = [np.full(hc.size, i, dtype=np.intp)
+                                for i, hc in enumerate(h_cols_list)]
+                H_rows_arr = (np.concatenate(H_row_blocks)
+                              if H_row_blocks else np.empty(0, dtype=np.intp))
+                H_cols_arr = (np.concatenate(h_cols_list)
+                              if h_cols_list else np.empty(0, dtype=np.intp))
+                row_sizes = np.array([hc.size for hc in h_cols_list], dtype=np.intp)
+                row_offsets = np.concatenate(
+                    ([0], np.cumsum(row_sizes))
+                ).astype(np.intp)
+                H_nnz = int(row_sizes.sum())
+                G_vals_const = np.ones(k)
+
+                def _G_jac_sparse(x, _v=G_vals_const):
+                    return _v
+
+                def _H_jac_sparse(x, _jfs=resolved_h_jac, _off=row_offsets,
+                                  _nnz=H_nnz):
+                    out = np.empty(_nnz)
+                    for i, jf in enumerate(_jfs):
+                        out[_off[i]:_off[i + 1]] = jf(x)
+                    return out
+
+                self.comp_G_jacobian = _G_jac_sparse
+                self.comp_H_jacobian = _H_jac_sparse
+                if self.comp_G_jacobian_sparsity is None:
+                    self.comp_G_jacobian_sparsity = (G_rows_arr, G_cols_arr)
+                if self.comp_H_jacobian_sparsity is None:
+                    self.comp_H_jacobian_sparsity = (H_rows_arr, H_cols_arr)
+            else:
+                def _G_jac(x, _idx=var_idx_arr, _k=k, _n=n):
+                    J = np.zeros((_k, _n))
+                    J[np.arange(_k), _idx] = 1.0
+                    return J
+
+                def _H_jac(x, _jfs=resolved_h_jac):
+                    return np.stack([jf(x) for jf in _jfs], axis=0)
+
+                self.comp_G_jacobian = _G_jac
+                self.comp_H_jacobian = _H_jac
 
         else:
             # Mixed mode: base comp_G/comp_H + k var-pair rows appended at the end
@@ -384,6 +511,8 @@ class MPCCProblem:
             base_H = self.comp_H
             base_G_jac = self.comp_G_jacobian
             base_H_jac = self.comp_H_jacobian
+            base_G_sp = self.comp_G_jacobian_sparsity
+            base_H_sp = self.comp_H_jacobian_sparsity
 
             if not callable(base_G_jac):
                 raise ValueError(
@@ -402,27 +531,163 @@ class MPCCProblem:
                     np.asarray(x, dtype=float)[_idx],
                 ])
 
-            def _H(x, _bH=base_H, _hfs=h_fns):  # type: ignore[misc]
-                return np.concatenate([
-                    np.asarray(_bH(x), dtype=float),
-                    np.array([float(np.asarray(hf(x)).ravel()[0]) for hf in _hfs]),
-                ])
-
-            def _G_jac(x, _bJac=base_G_jac, _idx=var_idx_arr, _k=k, _n=n):  # type: ignore[misc]
-                base_rows = np.asarray(_bJac(x), dtype=float)
-                id_rows = np.zeros((_k, _n))
-                id_rows[np.arange(_k), _idx] = 1.0
-                return np.vstack([base_rows, id_rows])
-
-            def _H_jac(x, _bJac=base_H_jac, _jfs=resolved_h_jac):  # type: ignore[misc]
-                base_rows = np.asarray(_bJac(x), dtype=float)
-                extra_rows = np.stack([jf(x) for jf in _jfs], axis=0)
-                return np.vstack([base_rows, extra_rows])
+            def _H(x, _bH=base_H, _hfs=h_fns, _k=k):  # type: ignore[misc]
+                base_vals = np.asarray(_bH(x), dtype=float)
+                out = np.empty(base_vals.size + _k)
+                out[:base_vals.size] = base_vals
+                offset = base_vals.size
+                for i, hf in enumerate(_hfs):
+                    out[offset + i] = np.asarray(hf(x)).ravel()[0]
+                return out
 
             self.comp_G = _G
             self.comp_H = _H
-            self.comp_G_jacobian = _G_jac
-            self.comp_H_jacobian = _H_jac
+
+            if sparse_mode:
+                if base_G_sp is None or base_H_sp is None:
+                    raise ValueError(
+                        "comp_var_pairs sparse (4-tuple) form in mixed mode requires "
+                        "both comp_G_jacobian_sparsity and comp_H_jacobian_sparsity "
+                        "to be set on the base problem"
+                    )
+
+                base_G_rows = np.asarray(base_G_sp[0], dtype=np.intp)
+                base_G_cols = np.asarray(base_G_sp[1], dtype=np.intp)
+                base_H_rows = np.asarray(base_H_sp[0], dtype=np.intp)
+                base_H_cols = np.asarray(base_H_sp[1], dtype=np.intp)
+
+                tail_G_rows = (n_base + np.arange(k, dtype=np.intp))
+                tail_G_cols = var_idx_arr.copy()
+                G_rows_arr = np.concatenate([base_G_rows, tail_G_rows])
+                G_cols_arr = np.concatenate([base_G_cols, tail_G_cols])
+
+                H_row_blocks = [np.full(hc.size, n_base + i, dtype=np.intp)
+                                for i, hc in enumerate(h_cols_list)]
+                tail_H_rows = (np.concatenate(H_row_blocks)
+                               if H_row_blocks else np.empty(0, dtype=np.intp))
+                tail_H_cols = (np.concatenate(h_cols_list)
+                               if h_cols_list else np.empty(0, dtype=np.intp))
+                H_rows_arr = np.concatenate([base_H_rows, tail_H_rows])
+                H_cols_arr = np.concatenate([base_H_cols, tail_H_cols])
+
+                n_base_G = int(base_G_rows.size)
+                n_base_H = int(base_H_rows.size)
+                row_sizes = np.array([hc.size for hc in h_cols_list], dtype=np.intp)
+                row_offsets = np.concatenate(
+                    ([0], np.cumsum(row_sizes))
+                ).astype(np.intp)
+                tail_H_nnz = int(row_sizes.sum())
+                G_vals_tail_const = np.ones(k)
+
+                def _G_jac_sparse(x, _bJac=base_G_jac, _tail=G_vals_tail_const,
+                                  _nb=n_base_G):  # type: ignore[misc]
+                    out = np.empty(_nb + _tail.size)
+                    out[:_nb] = np.asarray(_bJac(x), dtype=float).ravel()
+                    out[_nb:] = _tail
+                    return out
+
+                def _H_jac_sparse(x, _bJac=base_H_jac, _jfs=resolved_h_jac,
+                                  _off=row_offsets, _nb=n_base_H,
+                                  _tail_nnz=tail_H_nnz):  # type: ignore[misc]
+                    out = np.empty(_nb + _tail_nnz)
+                    out[:_nb] = np.asarray(_bJac(x), dtype=float).ravel()
+                    for i, jf in enumerate(_jfs):
+                        out[_nb + _off[i]:_nb + _off[i + 1]] = jf(x)
+                    return out
+
+                self.comp_G_jacobian = _G_jac_sparse
+                self.comp_H_jacobian = _H_jac_sparse
+                self.comp_G_jacobian_sparsity = (G_rows_arr, G_cols_arr)
+                self.comp_H_jacobian_sparsity = (H_rows_arr, H_cols_arr)
+            else:
+                def _G_jac(x, _bJac=base_G_jac, _idx=var_idx_arr, _k=k, _n=n):  # type: ignore[misc]
+                    base_rows = np.asarray(_bJac(x), dtype=float)
+                    id_rows = np.zeros((_k, _n))
+                    id_rows[np.arange(_k), _idx] = 1.0
+                    return np.vstack([base_rows, id_rows])
+
+                def _H_jac(x, _bJac=base_H_jac, _jfs=resolved_h_jac):  # type: ignore[misc]
+                    base_rows = np.asarray(_bJac(x), dtype=float)
+                    extra_rows = np.stack([jf(x) for jf in _jfs], axis=0)
+                    return np.vstack([base_rows, extra_rows])
+
+                self.comp_G_jacobian = _G_jac
+                self.comp_H_jacobian = _H_jac
+
+    def _apply_var_pairs_bulk(self) -> None:
+        """Wire ``comp_var_pairs_bulk`` into ``comp_G`` / ``comp_H`` and Jacobians.
+
+        Expects ``self.comp_var_pairs_bulk`` to be a 4-tuple
+        ``(var_idxs, h_bulk_fn, h_bulk_jac_fn, h_bulk_jac_sparsity)``.
+        Sets ``comp_G_jacobian_sparsity`` to identity-on-var_idxs and forwards
+        the user's H sparsity unchanged.  Mutually exclusive with the per-row
+        ``comp_var_pairs`` form.
+        """
+        bulk = self.comp_var_pairs_bulk
+        if not isinstance(bulk, tuple) or len(bulk) != 4:
+            raise ValueError(
+                "comp_var_pairs_bulk must be a 4-tuple "
+                "(var_idxs, h_bulk_fn, h_bulk_jac_fn, h_bulk_jac_sparsity)"
+            )
+        var_idxs_in, h_bulk_fn, h_bulk_jac_fn, h_bulk_jac_sp = bulk
+
+        n = self.n
+        var_idxs = np.asarray(var_idxs_in, dtype=np.intp).ravel()
+        k = var_idxs.size
+        if k != self.n_comp:
+            raise ValueError(
+                f"comp_var_pairs_bulk: var_idxs has {k} entries but "
+                f"n_comp={self.n_comp}; lengths must match"
+            )
+        if k > 0 and (var_idxs.min() < 0 or var_idxs.max() >= n):
+            raise ValueError(
+                f"comp_var_pairs_bulk: var_idxs entries must be in [0, {n})"
+            )
+        if not callable(h_bulk_fn):
+            raise ValueError("comp_var_pairs_bulk: h_bulk_fn must be callable")
+        if not callable(h_bulk_jac_fn):
+            raise ValueError("comp_var_pairs_bulk: h_bulk_jac_fn must be callable")
+        if (not isinstance(h_bulk_jac_sp, tuple)) or len(h_bulk_jac_sp) != 2:
+            raise ValueError(
+                "comp_var_pairs_bulk: h_bulk_jac_sparsity must be a (rows, cols) tuple"
+            )
+        H_rows = np.asarray(h_bulk_jac_sp[0], dtype=np.intp).ravel()
+        H_cols = np.asarray(h_bulk_jac_sp[1], dtype=np.intp).ravel()
+        if H_rows.size != H_cols.size:
+            raise ValueError(
+                f"comp_var_pairs_bulk: H sparsity rows/cols size mismatch "
+                f"({H_rows.size} vs {H_cols.size})"
+            )
+        if H_rows.size > 0 and (H_rows.min() < 0 or H_rows.max() >= k):
+            raise ValueError(
+                f"comp_var_pairs_bulk: H sparsity rows must be in [0, {k})"
+            )
+        if H_cols.size > 0 and (H_cols.min() < 0 or H_cols.max() >= n):
+            raise ValueError(
+                f"comp_var_pairs_bulk: H sparsity cols must be in [0, {n})"
+            )
+
+        assert self.xl is not None
+        self.xl[var_idxs] = np.maximum(self.xl[var_idxs], 0.0)
+
+        G_vals_const = np.ones(k)
+
+        def _G(x, _idx=var_idxs):
+            return np.asarray(x, dtype=float)[_idx]
+
+        def _G_jac(x, _v=G_vals_const):
+            return _v
+
+        self.comp_G = _G
+        self.comp_H = h_bulk_fn
+        self.comp_G_jacobian = _G_jac
+        self.comp_H_jacobian = h_bulk_jac_fn
+        if self.comp_G_jacobian_sparsity is None:
+            self.comp_G_jacobian_sparsity = (
+                np.arange(k, dtype=np.intp), var_idxs.copy()
+            )
+        if self.comp_H_jacobian_sparsity is None:
+            self.comp_H_jacobian_sparsity = (H_rows, H_cols)
 
     def _check_derivatives_resolved(self) -> None:
         """Raise a clear error when a required derivative is still missing.

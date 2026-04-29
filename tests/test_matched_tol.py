@@ -175,7 +175,7 @@ class TestEndToEnd:
         assert result.comp_residual < 1e-4
 
     def test_matched_compatible_with_safeguards_all(self):
-        # safeguards="all" sets quadratic; user override to matched wins.
+        # safeguards="all" leaves inner_tol_mode at its default; explicit "matched" is respected.
         result = pympcc.solve(
             _make_problem(),
             strategy="scholtes",

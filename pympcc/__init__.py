@@ -22,6 +22,7 @@ Quickstart
 >>> result.success    # convergence flag
 """
 
+from . import bilevel
 from ._autoscale import autoscale_comp_pairs
 from ._diagnostics import active_sets, classify_cq
 from ._presolve import PresolveMap, presolve
@@ -59,5 +60,6 @@ __all__ = [
     "multistart",
     "MultiStartResult",
     "TNLPResult",
+    "bilevel",
 ]
-__version__ = "0.4.2"
+__version__ = "0.4.3"

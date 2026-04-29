@@ -7,6 +7,68 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [Unreleased]
+
+---
+
+## [0.4.3] - 2026-04-29
+
+### Added
+
+**Bilevel KKT-emitter frontend (§5.4)**
+- New module `pympcc.bilevel` exposing `from_lower_level(...)`, which rewrites a
+  bilevel program `min_{x,y} F(x,y) s.t. y ∈ argmin_y{f(x,y): g(x,y)≤0, h(x,y)=0}`
+  into an `MPCCProblem` by emitting the lower-level KKT system (stationarity,
+  feasibility, and `λ ≥ 0 ⊥ −g(x,y) ≥ 0`).
+- Variable layout `z = [x_upper, y_lower, λ, μ]`; the λ block is automatically
+  lower-bounded at zero, and the μ block is left free.
+- `derivatives="jax"` (default) builds the stationarity rows via `jax.grad` and
+  fills every Jacobian via JAX autodiff; `derivatives="fd"` falls back to nested
+  finite differences.  No new dependencies.
+- 23 new tests in `tests/test_bilevel.py` covering construction, KKT
+  residuals at analytical optima, end-to-end solves under both backends,
+  and input validation.
+
+**Bulk MCP form (`comp_var_pairs_bulk`)**
+- New `MPCCProblem.comp_var_pairs_bulk` field for large-scale MCPs; takes a
+  4-tuple `(var_idxs, h_bulk_fn, h_bulk_jac_fn, h_bulk_jac_sparsity)` where
+  `h_bulk_fn(x) → ndarray (k,)` and `h_bulk_jac_fn(x) → flat nnz values` are
+  evaluated **once per callback** instead of per row.
+- `comp_G(x) = x[var_idxs]` (view, no copy); `comp_G_jacobian` is a constant
+  `ones(k)` callable with sparsity `(arange(k), var_idxs)`; H sparsity is
+  forwarded through unchanged.
+- Mutually exclusive with the per-row `comp_var_pairs`; raises `ValueError`
+  when both are set.
+- Designed for `n ≳ 10⁵`, `k ≳ 10⁴`. Measured ~2900× speedup for `comp_H`
+  and ~7700× for `comp_H_jacobian` at `k=1000` versus the per-row form.
+
+### Changed
+
+- **MCP per-row form: vectorised value/Jacobian closures.** `_normalize_var_pairs`
+  now writes into a pre-allocated `out` buffer instead of building a Python list
+  per row, removing the `np.array([...])` allocation on every `comp_H` call.
+- **MCP per-row Jacobian: hoisted size validation to construction.** Each
+  `h_jac_fn` is evaluated once at `x0` to verify it matches `h_cols`; the
+  per-callback `if vals.size != ...` branch is gone.
+- **MCP fd-fallback guard.** Building a 2-tuple MCP whose finite-difference
+  Jacobian would evaluate `h_fn` more than 10⁷ times per call now raises
+  `ValueError` pointing the user to `h_jac_fn` or `comp_var_pairs_bulk`.
+
+### Fixed
+
+- `BaseStrategy._build_safeguard_mode`: `safeguards="all"` no longer silently
+  upgrades `inner_tol_mode` from `"linear"` to `"quadratic"`. The default mode
+  is preserved; users who want quadratic must pass it explicitly.
+
+### Tests
+
+- 11 new tests in `tests/test_mcp_var_pairs.py` covering `TestBulkForm`
+  (construction, G/H values, constant ones G-Jacobian, lower-bound clamp,
+  parity with the per-row form, mutual exclusion, validation errors) and
+  `TestFdGuard` (large-fd rejection, small-fd allowed).
+
+---
+
 ## [0.4.2] - 2026-04-28
 
 ### Added

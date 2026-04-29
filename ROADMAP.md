@@ -20,7 +20,7 @@ analysis.  Complete each tier before starting the next.
 | 2 | TNLP refinement (certified MPCC multipliers) | §2.6 | M | ✅ |
 | 3 | SOSC — second-order sufficient conditions | §2.3 | M | ✅ |
 | 4 | Variable-paired complementarity (MCP form) | §4.5 | M | ✅ |
-| 5 | Bilevel KKT-emitter frontend | §5.4 | M | planned |
+| 5 | Bilevel KKT-emitter frontend | §5.4 | M | ✅ |
 | 6 | NCP-function reformulation menu | §3.5 | M | ✅ |
 | 7 | MacMPEC full benchmark runner (150 problems) | §4.7 | S | ✅ |
 | 8 | Branch-and-bound (global MPCC) | §3.1 | L | deferred |
@@ -561,34 +561,42 @@ Module: `pympcc/strategies/_base.py` — `_run_epsilon_continuation`,
 Equilibrium problems with equilibrium constraints; out of scope for
 the SIAM imaging paper but a natural follow-up.
 
-### 5.4. Bilevel KKT-emitter frontend — (M) · *priority 5*
+### 5.4. Bilevel KKT-emitter frontend ✅ *(shipped)*
 
-BilevelJuMP, YALMIP `solvebilevel`, and (historically) `pyomo.bilevel`
-accept `(F_upper, F_lower, vars_upper, vars_lower)` and emit the MPCC
-by writing the lower-level KKT automatically.  Hyperparameter
-learning, Stackelberg games, and inverse optimisation — the dominant
-MPCC use cases — are bilevel by origin.  Users currently write the
-KKT by hand.
+`pympcc.bilevel.from_lower_level(...)` rewrites a bilevel program
+
+```
+min_{x, y}  F(x, y)
+s.t.        y ∈ argmin_y { f(x, y) : g(x, y) ≤ 0,  h(x, y) = 0 }
+```
+
+into an `MPCCProblem` by emitting the lower-level KKT system:
+stationarity (`∇_y f + Σλ ∇_y g + Σμ ∇_y h = 0`), lower-level
+equality (`h(x, y) = 0`), and the complementarity pair
+`λ ≥ 0 ⊥ −g(x, y) ≥ 0`.  Variable layout
+`z = [x_upper, y_lower, λ, μ]`; the λ block is automatically lower-
+bounded at zero.
 
 API:
 
 ```python
 mpcc = pympcc.bilevel.from_lower_level(
-    f_upper, vars_upper,
-    f_lower, vars_lower,
-    g_lower=None, h_lower=None,    # lower-level constraints
+    n_x=..., n_y=..., x0=..., y0=...,
+    f_upper=...,
+    f_lower=...,
+    n_g_lower=..., g_lower=...,
+    n_h_lower=0, h_lower=None,
+    derivatives="jax",   # or "fd"
 )
 result = pympcc.solve(mpcc)
 ```
 
-The emitter writes stationarity (`∇_y L = 0`), feasibility
-(`g_lower(x,y) ≤ 0`, `h_lower(x,y) = 0`), and the inequality
-complementarity pair (`λ ≥ 0 ⊥ −g_lower(x,y) ≥ 0`) directly into a
-`MPCCProblem`.  Composes with §4.5 (variable-paired
-complementarity).  No new dependencies; optional CVXPY DPP consumer
-later.
+`derivatives="jax"` produces single-level autodiff for stationarity
+and every Jacobian; `derivatives="fd"` falls back to nested finite
+differences (acceptable for prototyping).  No new dependencies.
 
 Module: `pympcc/bilevel.py`.
+Tests: `tests/test_bilevel.py` (23 cases).
 
 ---
 

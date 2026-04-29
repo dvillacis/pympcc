@@ -385,8 +385,6 @@ class BaseStrategy(ABC):
         kk_on  = bool(opts.get("safeguard_kkt_termination", False))   or all_on
         pl_on  = bool(opts.get("safeguard_plateau", False))           or all_on
         mode   = opts.get("inner_tol_mode", "linear")
-        if all_on and mode == "linear":
-            mode = "quadratic"
         if mode not in ("linear", "quadratic", "matched"):
             raise ValueError(
                 "inner_tol_mode must be 'linear', 'quadratic', or 'matched',"
