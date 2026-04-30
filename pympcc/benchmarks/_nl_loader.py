@@ -13,8 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, Union
 
-from ._problems import PROBLEM_NAMES, ProblemSpec
 from ..frontend.ampl import from_nl
+from ._problems import PROBLEM_NAMES, ProblemSpec
 
 
 def load_nl_directory(
