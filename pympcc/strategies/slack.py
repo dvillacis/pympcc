@@ -87,7 +87,8 @@ class SlackStrategy(BaseStrategy):
         super().__init__(problem, ipopt_options,
                          backend=kwargs.pop("backend", "ipopt"),
                          solver_options=kwargs.pop("solver_options", None),
-                         callback=kwargs.pop("callback", None))
+                         callback=kwargs.pop("callback", None),
+                         inner_callback=kwargs.pop("inner_callback", None))
         opts = {**_DEFAULTS, **kwargs}
         opts = self._maybe_resolve_auto_epsilon_0(opts)
         self._validate_continuation_options(
@@ -269,6 +270,7 @@ class SlackStrategy(BaseStrategy):
             obj_fn=obj_fn, grad_fn=grad_fn, con_fn=con_fn, jac_fn=jac_fn,
             jac_rows=jac_structure[0], jac_cols=jac_structure[1],
             hess_fn=hess_fn, hess_sparsity=hess_sparsity,
+            inner_callback=self.inner_callback,
         )
         for key, val in self.ipopt_options.items():
             nlp.add_option(key, val)

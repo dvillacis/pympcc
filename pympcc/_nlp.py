@@ -1,10 +1,42 @@
 """Internal cyipopt adapters for dense and sparse standard NLPs."""
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Optional
 
 import cyipopt
 import numpy as np
+
+
+def _invoke_inner_callback(
+    cb: Optional[Callable[[int, dict], bool]],
+    iter_count: int,
+    alg_mod: int,
+    obj_value: float,
+    inf_pr: float,
+    inf_du: float,
+    mu: float,
+    d_norm: float,
+    regularization_size: float,
+    alpha_du: float,
+    alpha_pr: float,
+    ls_trials: int,
+) -> bool:
+    if cb is None:
+        return True
+    info = {
+        "alg_mod": int(alg_mod),
+        "obj_value": float(obj_value),
+        "inf_pr": float(inf_pr),
+        "inf_du": float(inf_du),
+        "mu": float(mu),
+        "d_norm": float(d_norm),
+        "regularization_size": float(regularization_size),
+        "alpha_du": float(alpha_du),
+        "alpha_pr": float(alpha_pr),
+        "ls_trials": int(ls_trials),
+    }
+    ret = cb(int(iter_count), info)
+    return False if ret is False else True
 
 
 class _HessianMixin:
@@ -70,6 +102,7 @@ class _DenseNLP(cyipopt.Problem):
         jac_fn: Callable,
         hess_fn=None,
         hess_sparsity=None,
+        inner_callback: Optional[Callable[[int, dict], bool]] = None,
     ) -> None:
         self._n = n
         self._m = m
@@ -77,6 +110,7 @@ class _DenseNLP(cyipopt.Problem):
         self._grad_fn = grad_fn
         self._con_fn = con_fn
         self._jac_fn = jac_fn
+        self._inner_callback = inner_callback
 
         # Hessian state — set BEFORE super().__init__ so hessianstructure() is
         # ready if cyipopt probes it during setup.
@@ -129,7 +163,10 @@ class _DenseNLP(cyipopt.Problem):
         if alg_mod == 1:
             self.entered_restoration = True
             self.restoration_iter_count += 1
-        return True
+        return _invoke_inner_callback(
+            self._inner_callback, iter_count, alg_mod, obj_value, inf_pr, inf_du,
+            mu, d_norm, regularization_size, alpha_du, alpha_pr, ls_trials,
+        )
 
     def objective(self, x: np.ndarray) -> float:
         return float(self._obj_fn(x))
@@ -183,6 +220,7 @@ class _SparseNLP(cyipopt.Problem):
         hess_fn=None,
         hess_sparsity=None,
         linear_solver_fn=None,
+        inner_callback: Optional[Callable[[int, dict], bool]] = None,
     ) -> None:
         self._n = n
         self._m = m
@@ -190,6 +228,7 @@ class _SparseNLP(cyipopt.Problem):
         self._grad_fn = grad_fn
         self._con_fn = con_fn
         self._jac_fn = jac_fn
+        self._inner_callback = inner_callback
         # Store before super().__init__ in case jacobianstructure() is called
         # early. Canonicalize to pointer-width ints and row-major order so the
         # native IPOPT backend sees a stable sparse structure regardless of how
@@ -247,7 +286,10 @@ class _SparseNLP(cyipopt.Problem):
         if alg_mod == 1:
             self.entered_restoration = True
             self.restoration_iter_count += 1
-        return True
+        return _invoke_inner_callback(
+            self._inner_callback, iter_count, alg_mod, obj_value, inf_pr, inf_du,
+            mu, d_norm, regularization_size, alpha_du, alpha_pr, ls_trials,
+        )
 
     def objective(self, x: np.ndarray) -> float:
         return float(self._obj_fn(x))

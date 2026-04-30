@@ -86,6 +86,7 @@ class BaseStrategy(ABC):
         self.solver_options = solver_options or {}
         self._linear_solver_fn = linear_solver_fn
         self.callback = kwargs.pop("callback", None)
+        self.inner_callback = kwargs.pop("inner_callback", None)
         # Strategies that accept no extra kwargs (e.g. DirectStrategy) inherit
         # this base __init__; unknown kwargs are silently ignored so that
         # callers can always pass e.g. epsilon_0/max_iter without branching.
@@ -212,6 +213,7 @@ class BaseStrategy(ABC):
             obj_fn=_obj, grad_fn=_grad,
             con_fn=con_fn, jac_fn=jac_fn,
             hess_fn=hess_fn, hess_sparsity=hess_sparsity,
+            inner_callback=self.inner_callback,
         )
         base: type[_DenseNLP] | type[_SparseNLP]
         # Resolve linear_solver_fn: explicit arg > instance attribute

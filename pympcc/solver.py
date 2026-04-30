@@ -151,6 +151,11 @@ class MPCCSolver:
         ``f(k: int, info: IterationInfo) -> None`` called after each outer
         iteration, where ``k`` is the 0-based iteration index.  Not called
         by the ``'direct'`` strategy (single solve, no outer loop).
+    inner_callback : callable, optional
+        ``f(iter_count: int, info: dict) -> bool`` invoked once per IPOPT
+        inner iteration.  Return ``False`` to stop the inner solve early.
+        ``info`` mirrors IPOPT's ``intermediate`` arguments.  Ignored by
+        the ``'filterSQP'`` and ``'scipy'`` backends.
     verbose : bool, optional
         If ``True`` and no *callback* is provided, prints a formatted
         progress table to stdout after each outer iteration (default ``False``).
@@ -175,6 +180,7 @@ class MPCCSolver:
         ipopt_options: dict | None = None,
         solver_options: dict | None = None,
         callback: Optional[Callable[[int, IterationInfo], None]] = None,
+        inner_callback: Optional[Callable[[int, dict], bool]] = None,
         verbose: bool = False,
         presolve: bool = False,
         diagnostics: bool = False,
@@ -227,6 +233,7 @@ class MPCCSolver:
             backend=backend,
             solver_options=self.solver_options,
             callback=callback,
+            inner_callback=inner_callback,
             **strategy_options,
         )
         # linear_solver_fn bypasses the strategy's _VALID_OPTIONS and is injected
@@ -351,6 +358,7 @@ def solve(
     ipopt_options: dict | None = None,
     solver_options: dict | None = None,
     callback: Optional[Callable[[int, IterationInfo], None]] = None,
+    inner_callback: Optional[Callable[[int, dict], bool]] = None,
     verbose: bool = False,
     presolve: bool = False,
     diagnostics: bool = False,
@@ -388,6 +396,14 @@ def solve(
     callback : callable, optional
         ``f(k: int, info: IterationInfo) -> None`` called after each outer
         iteration.  Not called by the ``'direct'`` strategy.
+    inner_callback : callable, optional
+        ``f(iter_count: int, info: dict) -> bool`` invoked once per IPOPT
+        inner iteration (every NLP solve, including each outer-loop NLP).
+        ``info`` carries IPOPT's ``intermediate`` arguments (``alg_mod``,
+        ``obj_value``, ``inf_pr``, ``inf_du``, ``mu``, ``d_norm``,
+        ``regularization_size``, ``alpha_du``, ``alpha_pr``, ``ls_trials``).
+        Return ``False`` to stop the current inner solve early; ``True``
+        (or ``None``) to continue.
     verbose : bool, optional
         If ``True`` and no *callback* is provided, prints a formatted
         progress table to stdout after each outer iteration (default ``False``).
@@ -450,7 +466,9 @@ def solve(
         backend=backend,
         ipopt_options=ipopt_options,
         solver_options=solver_options,
-        callback=callback, verbose=verbose,
+        callback=callback,
+        inner_callback=inner_callback,
+        verbose=verbose,
         presolve=presolve,
         diagnostics=diagnostics,
         autoscale=autoscale,

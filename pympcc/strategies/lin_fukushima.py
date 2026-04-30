@@ -110,7 +110,8 @@ class LinFukushimaStrategy(BaseStrategy):
         super().__init__(problem, ipopt_options,
                          backend=kwargs.pop("backend", "ipopt"),
                          solver_options=kwargs.pop("solver_options", None),
-                         callback=kwargs.pop("callback", None))
+                         callback=kwargs.pop("callback", None),
+                         inner_callback=kwargs.pop("inner_callback", None))
         opts = {**_DEFAULTS, **kwargs}
         opts = self._maybe_resolve_auto_epsilon_0(opts)
         self._validate_continuation_options(

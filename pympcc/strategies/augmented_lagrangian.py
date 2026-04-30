@@ -166,7 +166,8 @@ class AugmentedLagrangianStrategy(BaseStrategy):
         super().__init__(problem, ipopt_options,
                          backend=kwargs.pop("backend", "ipopt"),
                          solver_options=kwargs.pop("solver_options", None),
-                         callback=kwargs.pop("callback", None))
+                         callback=kwargs.pop("callback", None),
+                         inner_callback=kwargs.pop("inner_callback", None))
         opts = {**_DEFAULTS, **kwargs}
         self._validate_augmented_lagrangian_options(
             rho_0=opts["rho_0"],

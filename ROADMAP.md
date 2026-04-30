@@ -514,16 +514,28 @@ one of the approaches in §6.4:
 
 Expanding the suite is tracked under §6.4.
 
-### 4.8. Inner-iteration callback hook — (S) · *planned*
+### 4.8. Inner-iteration callback hook ✅ *(shipped)*
 
-Today `callback(k, info)` fires once per *outer* iteration (post-NLP).
-KNITRO and IPOPT both support a per-NLP-iter `intermediate_callback`
-for live visualisation, early stopping, and trust-region adaptation.
-Forward IPOPT's `intermediate_callback` through the strategy layer
-as `inner_callback(iter, info_dict) -> bool` (return `False` to
-stop).  Useful for research users plotting convergence in real time.
+`pympcc.solve(..., inner_callback=cb)` — and the equivalent
+`MPCCSolver(..., inner_callback=cb)` — forwards IPOPT's per-NLP-iter
+`intermediate` hook to the user as
+`cb(iter_count: int, info: dict) -> bool`.  Returning ``False`` stops
+the current inner solve (the outer loop then continues with the
+partial iterate as a warm-start).  ``info`` carries IPOPT's full
+``intermediate`` payload: ``alg_mod``, ``obj_value``, ``inf_pr``,
+``inf_du``, ``mu``, ``d_norm``, ``regularization_size``, ``alpha_du``,
+``alpha_pr``, ``ls_trials``.
 
-Module: extension to `pympcc/_nlp.py` (`_DenseNLP.intermediate`).
+Wired through both `_DenseNLP` and `_SparseNLP` so problems with sparse
+Jacobians (every `from_nl()` build, and the `slack` strategy's lifted
+NLP) get the hook too.  filterSQP / scipy backends ignore it (no
+equivalent intermediate hook).
+
+Module: `pympcc/_nlp.py` (`_invoke_inner_callback`,
+`_DenseNLP.intermediate`, `_SparseNLP.intermediate`); thread-through in
+`pympcc/strategies/_base.py` and each iterative strategy's
+`__init__`; surface in `pympcc/solver.py`.
+Tests: `tests/test_inner_callback.py` (10 cases).
 
 ---
 
@@ -649,11 +661,11 @@ Wrap `MPCCSolver.solve()` with a `time_limit` parameter:
 
 Module: extension to `pympcc/solver.py`.
 
-### 6.4. CUTEst / AMPL model library benchmark — (M) · *in progress*
+### 6.4. CUTEst / AMPL model library benchmark — (M) · *AMPL ✅ · CUTEst deferred*
 
-Extend `pympcc.benchmarks` beyond the current 13-problem MacMPEC subset.
+Extend `pympcc.benchmarks` beyond the original 13-problem MacMPEC subset.
 
-**AMPL `.nl` reader** (in progress) — :mod:`pympcc.frontend.ampl` — a
+**AMPL `.nl` reader** ✅ — :mod:`pympcc.frontend.ampl` — a
 self-contained text-format ``.nl`` parser, no external runtime deps.
 Operator coverage targets the ~30 ops MacMPEC uses; expressions are
 walked via reverse-mode AD over the parsed op-tree (no JAX dependency).
@@ -678,10 +690,9 @@ Staging plan:
    :func:`pympcc.benchmarks._nl_loader.load_nl_directory`; CLI flag
    `python -m pympcc.benchmarks.macmpec --from-nl <dir>` lands the
    `.nl`-driven benchmark path.
-
-Next steps (open): generate the remaining ~150 MacMPEC ``.nl`` fixtures
-one-time offline via AMPL and drop them into a separate fixture dir;
-the loader + CLI already handle arbitrary directories.
+6. ✅ Full MacMPEC `.nl` fixture set (≈168 problems) generated offline
+   via AMPL and committed under `tests/fixtures/nl/`.  The loader and
+   CLI consume the directory unchanged.
 
 Out of scope for the first ship: binary `.nl` format, defined functions
 (``f<N>``), piecewise-linear terms (``o63``), AMPL extensions.
