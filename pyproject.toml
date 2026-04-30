@@ -44,6 +44,13 @@ ipopt = ["cyipopt>=1.3"]
 numba = ["numba>=0.57"]
 jax = ["jax>=0.4"]
 scipy = ["scipy>=1.10"]
+docs = [
+    "sphinx>=7.3",
+    "myst-parser>=3.0",
+    "furo>=2024.5",
+    "sphinx-copybutton>=0.5",
+    "sphinx-autodoc-typehints>=2.0",
+]
 
 [build-system]
 requires = ["hatchling"]

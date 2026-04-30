@@ -26,3 +26,7 @@ CLAUDE.md
 .ruff_cache/
 
 .mypy_cache/
+
+# Sphinx
+docs/_build/
+docs/api/generated/
