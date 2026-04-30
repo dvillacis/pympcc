@@ -227,6 +227,26 @@ class MPCCProblem:
     comp_var_pairs_bulk: Optional[tuple] = None
 
     # ------------------------------------------------------------------ #
+    # Box-MCP / doubly-bounded complementarity (PATH / AMPL convention). #
+    # Each entry declares                                                  #
+    #     xl[var_idx] <= x[var_idx] <= xu[var_idx]   ⊥   F_fn(x)          #
+    # and is dispatched by bound finiteness:                              #
+    #   * lower-only (xl finite, xu = +inf) → comp pair                   #
+    #         (x[var_idx] - xl) >= 0  ⊥  F_fn(x) >= 0                     #
+    #   * upper-only (xl = -inf, xu finite) → comp pair                   #
+    #         (xu - x[var_idx]) >= 0  ⊥  -F_fn(x) >= 0                    #
+    #   * free (both infinite) → equality F_fn(x) = 0 appended to eq      #
+    #   * doubly-bounded (both finite) → NotImplementedError (§4.9 Phase 2)#
+    # Two grammars:                                                        #
+    #   (var_idx, F_fn)                — F Jacobian via forward fd         #
+    #   (var_idx, F_fn, F_jac_fn)      — user-supplied dense Jacobian row  #
+    # n_comp / n_eq are auto-bumped to include the synthesized rows;       #
+    # the user supplies n_comp / n_eq for the *base* problem only.         #
+    # Mutually exclusive with comp_var_pairs and comp_var_pairs_bulk.      #
+    # ------------------------------------------------------------------ #
+    comp_box_pairs: Optional[list] = None
+
+    # ------------------------------------------------------------------ #
     # Optional per-pair diagonal rescaling for the complementarity block #
     # ------------------------------------------------------------------ #
     # When set, every strategy operates on (s_G * G, s_H * H) instead of #
@@ -264,7 +284,13 @@ class MPCCProblem:
         # (they will be built by _normalize_var_pairs from the var-pair declarations).
         self._resolve_jax_fields()
         self._resolve_fd_fields()
+        if self.comp_box_pairs and (self.comp_var_pairs or self.comp_var_pairs_bulk):
+            raise ValueError(
+                "comp_box_pairs cannot be combined with comp_var_pairs or "
+                "comp_var_pairs_bulk in this release"
+            )
         self._normalize_var_pairs()   # merges var-pairs into comp_G/H and builds Jacobians
+        self._normalize_box_pairs()   # appends box-pair rows to comp_G/H or eq block
         self._check_derivatives_resolved()
         self._validate()
 
@@ -326,8 +352,11 @@ class MPCCProblem:
 
         if not self.comp_var_pairs:
             if self.comp_G is None or self.comp_H is None:
+                if self.comp_box_pairs:
+                    return  # comp_box_pairs will populate comp_G / comp_H
                 raise ValueError(
-                    "comp_G and comp_H are required when comp_var_pairs is not used"
+                    "comp_G and comp_H are required when neither comp_var_pairs "
+                    "nor comp_box_pairs is used"
                 )
             return
 
@@ -688,6 +717,316 @@ class MPCCProblem:
             )
         if self.comp_H_jacobian_sparsity is None:
             self.comp_H_jacobian_sparsity = (H_rows, H_cols)
+
+    def _normalize_box_pairs(self) -> None:
+        """Dispatch ``comp_box_pairs`` entries by bound finiteness.
+
+        Each entry ``(var_idx, F_fn[, F_jac_fn])`` is routed to one of:
+
+        * **Free** (``xl[var_idx] = -inf, xu[var_idx] = +inf``) → append
+          ``F(x) = 0`` to the equality block.
+        * **Lower-only** (``xl`` finite, ``xu = +inf``) → append comp pair
+          ``(x[var_idx] - xl) >= 0  ⊥  F(x) >= 0``.
+        * **Upper-only** (``xl = -inf``, ``xu`` finite) → append comp pair
+          ``(xu - x[var_idx]) >= 0  ⊥  -F(x) >= 0``.
+        * **Doubly-bounded** (both finite) → ``NotImplementedError``
+          (deferred to §4.9 Phase 2 / median NCP §3.5 ext).
+
+        ``n_comp`` and ``n_eq`` are auto-bumped to include the synthesized
+        rows; the user supplies them for the *base* problem only.
+
+        Sparse base ``comp_G/H`` or sparse ``eq_jacobian`` are rejected in
+        this first ship (deferred).  Mutually exclusive with
+        ``comp_var_pairs`` / ``comp_var_pairs_bulk``.
+        """
+        if not self.comp_box_pairs:
+            return
+
+        if self.comp_var_pairs or self.comp_var_pairs_bulk:
+            raise ValueError(
+                "comp_box_pairs cannot be combined with comp_var_pairs or "
+                "comp_var_pairs_bulk in this release"
+            )
+
+        from ._fd import fd_jacobian as _fd_jac
+
+        n = self.n
+        h_fd = self.fd_h
+        h_mode = self.fd_mode
+        assert self.xl is not None and self.xu is not None
+
+        # ---- Parse entries ------------------------------------------------
+        parsed: list = []
+        for entry in self.comp_box_pairs:
+            if len(entry) == 2:
+                vi, F_fn = entry
+                F_jac = None
+            elif len(entry) == 3:
+                vi, F_fn, F_jac = entry
+            else:
+                raise ValueError(
+                    "comp_box_pairs entries must be (var_idx, F_fn) or "
+                    "(var_idx, F_fn, F_jac_fn)"
+                )
+            if not (0 <= int(vi) < n):
+                raise ValueError(
+                    f"comp_box_pairs: var_idx {vi} is out of range [0, {n})"
+                )
+            if not callable(F_fn):
+                raise ValueError(
+                    f"comp_box_pairs: F_fn for var_idx={vi} must be callable"
+                )
+            if F_jac is not None and not callable(F_jac):
+                raise ValueError(
+                    f"comp_box_pairs: F_jac_fn for var_idx={vi} must be callable or None"
+                )
+            ell = float(self.xl[int(vi)])
+            u = float(self.xu[int(vi)])
+            parsed.append((int(vi), F_fn, F_jac, ell, u))
+
+        # Reject duplicate var_idx entries (ambiguous semantics).
+        seen: set[int] = set()
+        for vi, *_ in parsed:
+            if vi in seen:
+                raise ValueError(
+                    f"comp_box_pairs: var_idx={vi} appears in more than one entry"
+                )
+            seen.add(vi)
+
+        # ---- Categorize by bound finiteness -------------------------------
+        free_entries: list = []
+        lower_entries: list = []
+        upper_entries: list = []
+        for vi, F_fn, F_jac, ell, u in parsed:
+            ell_finite = bool(np.isfinite(ell))
+            u_finite = bool(np.isfinite(u))
+            if ell_finite and u_finite:
+                raise NotImplementedError(
+                    f"comp_box_pairs: var_idx={vi} has doubly-bounded box "
+                    f"[{ell}, {u}]; this requires the median NCP "
+                    "(ROADMAP §3.5 ext / §4.9 Phase 2) which is not yet shipped. "
+                    "Workaround: drop one of the bounds, or lift manually with "
+                    "auxiliary slacks."
+                )
+            if ell_finite:
+                lower_entries.append((vi, F_fn, F_jac, ell))
+            elif u_finite:
+                upper_entries.append((vi, F_fn, F_jac, u))
+            else:
+                free_entries.append((vi, F_fn, F_jac))
+
+        # ---- Resolve any None F_jac_fn to a per-row forward fd callable ----
+        def _resolve_F_jac(F_fn, F_jac):
+            if F_jac is not None:
+                return F_jac
+            def _fd_row(x, _f=F_fn, _h=h_fd, _m=h_mode):
+                return _fd_jac(_f, 1, n, _h, _m)(x)[0]
+            return _fd_row
+
+        # ---- Lower / upper-only → extend comp_G / comp_H block -------------
+        if lower_entries or upper_entries:
+            self._extend_comp_with_box(lower_entries, upper_entries, _resolve_F_jac)
+
+        # ---- Free → extend eq block ---------------------------------------
+        if free_entries:
+            self._extend_eq_with_free(free_entries, _resolve_F_jac)
+
+        if self.comp_G is None:
+            raise ValueError(
+                "comp_box_pairs: every entry is free (both bounds infinite) "
+                "and no base comp_G / comp_H is provided. The result is a "
+                "pure square nonlinear system (CNS), not an MPCC. pympcc "
+                "requires at least one complementarity pair; use a CNS / "
+                "rootfinding solver if that is what you need."
+            )
+
+    def _extend_comp_with_box(self, lower_entries, upper_entries, resolve_F_jac) -> None:
+        """Append lower- and upper-only box-MCP rows to the comp_G/H block."""
+        if (self.comp_G is not None
+                and (self.comp_G_jacobian_sparsity is not None
+                     or self.comp_H_jacobian_sparsity is not None)):
+            raise NotImplementedError(
+                "comp_box_pairs with sparse base comp_G/comp_H is not yet supported. "
+                "Pass dense base Jacobians or wait for §4.9 Phase 2."
+            )
+
+        n = self.n
+        n_lower = len(lower_entries)
+        n_upper = len(upper_entries)
+        n_box_comp = n_lower + n_upper
+
+        lower_idx = np.array([vi for vi, *_ in lower_entries], dtype=np.intp)
+        lower_ell = np.array([ell for *_, ell in lower_entries], dtype=float)
+        upper_idx = np.array([vi for vi, *_ in upper_entries], dtype=np.intp)
+        upper_u = np.array([u for *_, u in upper_entries], dtype=float)
+
+        lower_F_fns = [F_fn for _, F_fn, *_ in lower_entries]
+        upper_F_fns = [F_fn for _, F_fn, *_ in upper_entries]
+        lower_F_jacs = [resolve_F_jac(F_fn, F_jac)
+                        for _, F_fn, F_jac, _ in lower_entries]
+        upper_F_jacs = [resolve_F_jac(F_fn, F_jac)
+                        for _, F_fn, F_jac, _ in upper_entries]
+
+        base_G = self.comp_G
+        base_H = self.comp_H
+        base_G_jac = self.comp_G_jacobian if callable(self.comp_G_jacobian) else None
+        base_H_jac = self.comp_H_jacobian if callable(self.comp_H_jacobian) else None
+        n_base = self.n_comp  # base count BEFORE we extend
+
+        if base_G is not None:
+            if base_G_jac is None or base_H_jac is None:
+                raise ValueError(
+                    "comp_box_pairs requires comp_G_jacobian and comp_H_jacobian "
+                    "to be resolved callables when base comp_G / comp_H are set. "
+                    "Pass derivatives='fd' / 'jax' or supply Jacobians explicitly."
+                )
+
+            def _G(x, _bG=base_G, _li=lower_idx, _le=lower_ell,
+                   _ui=upper_idx, _uu=upper_u):
+                base_vals = np.asarray(_bG(x), dtype=float).ravel()
+                xv = np.asarray(x, dtype=float)
+                box_lower = (xv[_li] - _le) if _li.size else np.empty(0)
+                box_upper = (_uu - xv[_ui]) if _ui.size else np.empty(0)
+                return np.concatenate([base_vals, box_lower, box_upper])
+
+            def _H(x, _bH=base_H, _lf=lower_F_fns, _uf=upper_F_fns):
+                base_vals = np.asarray(_bH(x), dtype=float).ravel()
+                lower_vals = (np.array([np.asarray(f(x)).ravel()[0] for f in _lf])
+                              if _lf else np.empty(0))
+                upper_vals = (-np.array([np.asarray(f(x)).ravel()[0] for f in _uf])
+                              if _uf else np.empty(0))
+                return np.concatenate([base_vals, lower_vals, upper_vals])
+
+            def _G_jac(x, _bJ=base_G_jac, _li=lower_idx, _ui=upper_idx,
+                       _nb=n_base, _nbox=n_box_comp, _n=n):
+                J = np.zeros((_nb + _nbox, _n))
+                J[:_nb, :] = np.asarray(_bJ(x), dtype=float)
+                for i in range(_li.size):
+                    J[_nb + i, _li[i]] = 1.0
+                for i in range(_ui.size):
+                    J[_nb + _li.size + i, _ui[i]] = -1.0
+                return J
+
+            def _H_jac(x, _bJ=base_H_jac, _lj=lower_F_jacs, _uj=upper_F_jacs,
+                       _nb=n_base, _nbox=n_box_comp, _n=n):
+                J = np.zeros((_nb + _nbox, _n))
+                J[:_nb, :] = np.asarray(_bJ(x), dtype=float)
+                for i, jf in enumerate(_lj):
+                    J[_nb + i, :] = np.asarray(jf(x), dtype=float).ravel()
+                for i, jf in enumerate(_uj):
+                    J[_nb + len(_lj) + i, :] = -np.asarray(jf(x), dtype=float).ravel()
+                return J
+
+            self.comp_G = _G
+            self.comp_H = _H
+            self.comp_G_jacobian = _G_jac
+            self.comp_H_jacobian = _H_jac
+        else:
+            if n_base != 0:
+                raise ValueError(
+                    f"comp_box_pairs: comp_G is None but n_comp={n_base}; "
+                    "with comp_box_pairs only (no base comp_G/H), set n_comp=0 "
+                    "(box-pair contributions are auto-counted)."
+                )
+
+            def _G(x, _li=lower_idx, _le=lower_ell, _ui=upper_idx, _uu=upper_u):
+                xv = np.asarray(x, dtype=float)
+                box_lower = (xv[_li] - _le) if _li.size else np.empty(0)
+                box_upper = (_uu - xv[_ui]) if _ui.size else np.empty(0)
+                return np.concatenate([box_lower, box_upper])
+
+            def _H(x, _lf=lower_F_fns, _uf=upper_F_fns):
+                lower_vals = (np.array([np.asarray(f(x)).ravel()[0] for f in _lf])
+                              if _lf else np.empty(0))
+                upper_vals = (-np.array([np.asarray(f(x)).ravel()[0] for f in _uf])
+                              if _uf else np.empty(0))
+                return np.concatenate([lower_vals, upper_vals])
+
+            def _G_jac(x, _li=lower_idx, _ui=upper_idx, _nbox=n_box_comp, _n=n):
+                J = np.zeros((_nbox, _n))
+                for i in range(_li.size):
+                    J[i, _li[i]] = 1.0
+                for i in range(_ui.size):
+                    J[_li.size + i, _ui[i]] = -1.0
+                return J
+
+            def _H_jac(x, _lj=lower_F_jacs, _uj=upper_F_jacs, _nbox=n_box_comp, _n=n):
+                J = np.zeros((_nbox, _n))
+                for i, jf in enumerate(_lj):
+                    J[i, :] = np.asarray(jf(x), dtype=float).ravel()
+                for i, jf in enumerate(_uj):
+                    J[len(_lj) + i, :] = -np.asarray(jf(x), dtype=float).ravel()
+                return J
+
+            self.comp_G = _G
+            self.comp_H = _H
+            self.comp_G_jacobian = _G_jac
+            self.comp_H_jacobian = _H_jac
+
+        self.n_comp = n_base + n_box_comp
+
+    def _extend_eq_with_free(self, free_entries, resolve_F_jac) -> None:
+        """Append free-variable box-pair entries as ``F(x) = 0`` rows."""
+        if self.eq_jacobian_sparsity is not None:
+            raise NotImplementedError(
+                "comp_box_pairs free entries with sparse base eq_jacobian "
+                "are not yet supported."
+            )
+
+        n = self.n
+        n_free = len(free_entries)
+        free_F_fns = [F_fn for _, F_fn, *_ in free_entries]
+        free_F_jacs = [resolve_F_jac(F_fn, F_jac)
+                       for _, F_fn, F_jac in free_entries]
+
+        n_eq_base = self.n_eq
+        base_eq = self.eq_constraints
+        base_eq_jac = self.eq_jacobian if callable(self.eq_jacobian) else None
+
+        if base_eq is not None and base_eq_jac is None:
+            raise ValueError(
+                "comp_box_pairs free entries require eq_jacobian to be a "
+                "resolved callable when base eq_constraints is set. "
+                "Pass derivatives='fd' / 'jax' or supply eq_jacobian explicitly."
+            )
+
+        if base_eq is not None:
+            def _eq(x, _be=base_eq, _ffs=free_F_fns):
+                base_vals = np.asarray(_be(x), dtype=float).ravel()
+                free_vals = np.array([np.asarray(f(x)).ravel()[0] for f in _ffs])
+                return np.concatenate([base_vals, free_vals])
+
+            def _eq_jac(x, _bJ=base_eq_jac, _jfs=free_F_jacs,
+                        _nb=n_eq_base, _nf=n_free, _n=n):
+                J = np.zeros((_nb + _nf, _n))
+                J[:_nb, :] = np.asarray(_bJ(x), dtype=float)
+                for i, jf in enumerate(_jfs):
+                    J[_nb + i, :] = np.asarray(jf(x), dtype=float).ravel()
+                return J
+
+            self.eq_constraints = _eq
+            self.eq_jacobian = _eq_jac
+        else:
+            if n_eq_base != 0:
+                raise ValueError(
+                    f"comp_box_pairs: eq_constraints is None but n_eq={n_eq_base}; "
+                    "with free box-pair entries only, set n_eq=0 (free "
+                    "contributions are auto-counted)."
+                )
+
+            def _eq(x, _ffs=free_F_fns):
+                return np.array([np.asarray(f(x)).ravel()[0] for f in _ffs])
+
+            def _eq_jac(x, _jfs=free_F_jacs, _nf=n_free, _n=n):
+                J = np.zeros((_nf, _n))
+                for i, jf in enumerate(_jfs):
+                    J[i, :] = np.asarray(jf(x), dtype=float).ravel()
+                return J
+
+            self.eq_constraints = _eq
+            self.eq_jacobian = _eq_jac
+
+        self.n_eq = n_eq_base + n_free
 
     def _check_derivatives_resolved(self) -> None:
         """Raise a clear error when a required derivative is still missing.

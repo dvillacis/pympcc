@@ -1,8 +1,9 @@
 # pympcc Roadmap
 
-This roadmap tracks parity with commercial MPCC solvers (KNITRO MPEC,
-GAMS-NLPEC, FilterMPEC, BARON-MPCC) across presolve, diagnostics,
-solution methods, and modeling UX.
+This roadmap tracks parity with commercial MPCC and MCP solvers
+(KNITRO MPEC, GAMS-NLPEC, GAMS-PATH, BARON-MPCC, FilterMPEC, LINDO MPEC,
+Pyomo.MPEC, Complementarity.jl/PATHSolver.jl) across presolve,
+diagnostics, solution methods, and modeling UX.
 
 Items are tagged ✅ *shipped*, 🔄 *in progress*, or *planned*.  Scope
 estimates: **S** (≲200 lines + tests), **M** (~500–1500), **L** (multi-week).
@@ -14,6 +15,8 @@ estimates: **S** (≲200 lines + tests), **M** (~500–1500), **L** (multi-week)
 Ordered by impact-to-effort ratio derived from the commercial-grade gap
 analysis.  Complete each tier before starting the next.
 
+### Phase 1 — shipped
+
 | # | Item | Section | Scope | Status |
 |---|------|---------|-------|--------|
 | 1 | Per-pair status + `to_json` / `to_dataframe` | §4.6 | S | ✅ |
@@ -24,6 +27,26 @@ analysis.  Complete each tier before starting the next.
 | 6 | NCP-function reformulation menu | §3.5 | M | ✅ |
 | 7 | MacMPEC full benchmark runner (150 problems) | §4.7 | S | ✅ |
 | 8 | Branch-and-bound (global MPCC) | §3.1 | L | deferred |
+
+### Phase 2 — surfaced by commercial gap analysis (planned)
+
+Ordered by impact-to-effort.  Items 9 and 10 are research-positioning
+plays (no GAMS-tier solver ships them today); 11–13 close the largest
+PATH/KNITRO parity gaps; 14–17 are smaller polish items.
+
+| # | Item | Section | Scope | Status |
+|---|------|---------|-------|--------|
+| 9  | JAX-differentiable solve (`custom_vjp` through TNLP)         | §5.6 | M | ✅ shipped |
+| 10 | Pyomo / `mpec.complementarity` frontend                      | §4.1 | M | planned |
+| 11 | Box-MCP / doubly-bounded canonical form `ℓ ≤ x ≤ u ⊥ F(x)`   | §4.9 | M | Phase 1 ✅ / Phase 2 planned |
+| 12 | Stateful warm hot-start solver object (MPC rolling-horizon)  | §6.5 | M | planned |
+| 13 | PATH-style multi-merit & degeneracy termination diagnostics  | §2.7 | S | ✅ |
+| 14 | Parallel multistart (`n_jobs`)                               | §6.1 | S | planned |
+| 15 | Additional NCPs (Chen-Mangasarian, Billups, Veelken-Ulbrich, median) | §3.5 ext | S | planned |
+| 16 | EPEC multi-leader KKT emitter                                | §5.5 | M | planned |
+| 17 | NLPEC modifier matrix (slack × constraint × aggregate × NCPBounds) | §6.6 | M | planned |
+| 18 | MPECopt-style piecewise-SQP (finite-step B-stationarity)     | §3.8 | L | research |
+| 19 | Raghunathan-Biegler IPOPT-C (modified barrier interior point) | §3.9 | L | deferred |
 
 ---
 
@@ -297,6 +320,40 @@ already returned MPCC-LICQ S-stationary multipliers.
 Module: `pympcc/_tnlp.py` (new); hook into `MPCCSolver.solve()`
 behind `tnlp_refine=True` (or auto-on when `diagnostics=True`).
 
+### 2.7. PATH-style multi-merit & degeneracy diagnostics ✅ *(shipped)*
+
+PATH is the de-facto MCP reference and ships ~12 termination-time
+diagnostics; pympcc now ships the load-bearing subset:
+
+* **Multi-merit cross-check at `x*`** ✅ — Fischer-Burmeister
+  `|G + H − √(G² + H²)|`, min-map `|min(G, H)|`, and inner-product
+  `|G · H|`.  Disagreement between merits localises numerical trouble
+  (one merit can mask issues another exposes).  Reported max/mean for
+  each, plus a single `disagreement_ratio` summary.
+* **Jacobian row/col norms** ✅ — max / min / near-zero count over the
+  active-constraint Jacobian (the same stack `classify_cq` builds for
+  the LICQ test, so cost is negligible).  Near-zero rows or columns
+  are degeneracy signals.
+* **Zero-row / zero-column counts** ✅ — surfaced inside
+  `result.jac_row_norms["n_zero"]` and the analogous column field.
+* **Initial-point statistics** ✅ — PATH's
+  `output_initial_point_statistics` parity: comp residual, min-map
+  residual, bound violation, ineq/eq residual at `x0`.
+* **Proximal perturbation usage** — deferred (PATH-specific to its
+  pivoting linear-solve path; pympcc's IPOPT backend exposes no
+  equivalent state).
+
+Surfaces as `result.merit_cross_check`, `result.jac_row_norms`,
+`result.jac_col_norms`, `result.degeneracy_report`,
+`result.initial_point_stats`.  All five are populated only when the
+solver is invoked with `diagnostics=True`; default solves are
+overhead-free.
+
+Module: `pympcc/_diagnostics.py` — `merit_cross_check`, `jac_norms`,
+`initial_point_statistics`, `degeneracy_report`.
+Hook: `MPCCSolver._attach_diagnostics`.
+Tests: `tests/test_path_diagnostics.py` (18 cases).
+
 ---
 
 ## 3. Solution methods
@@ -363,6 +420,66 @@ Each lands as its own thin strategy class reusing the smoothing
 ε-continuation harness.  No new infrastructure.
 
 Module: `pympcc/strategies/ncp.py` — `SmoothMinStrategy`, `ChenChenKanzowStrategy`, `KanzowSchwartzStrategy`. ✅ Shipped in 0.4.2.
+
+**Phase-2 additions (§3.5 ext, priority 15) — planned:**
+
+GAMS-NLPEC's `equreform` table currently has 33 rows; pympcc has 9
+(direct, Scholtes, smoothing/FB, Lin-Fukushima, slack, augLag, plus the
+three NCPs above).  Closing the most-cited remaining gaps:
+
+* **Chen-Mangasarian asymmetric** — `φ_α(a, b) = α·(a + b) − √(a² + b² + (1−α)·2ab)`
+  for `α ∈ (0, 1]`; the FB ↔ inner-product interpolation that NLPEC
+  exposes as `CMxf` / `CMfx`.
+* **Billups composite** — `φ(a, b) = φ_FB(a, b) − γ·a₊·b₊` with
+  γ-schedule; `Bill` / `fBill` in NLPEC.
+* **Veelken-Ulbrich smoothings** — `fVUsin`, `fVUpow` smooth perturbations
+  of the min-NCP that retain MFCQ near degeneracy.
+* **Median NCP for doubly-bounded variables** — `median(x − ℓ, x − u, F(x)) = 0`,
+  required by box-MCP (§4.9).  This is the *one* NCP that pympcc cannot
+  ship until §4.9 lands, since it depends on the box-MCP canonical form.
+
+Each lands as a thin strategy class (~80 LOC) reusing the smoothing
+ε-continuation harness.
+
+### 3.8. Piecewise-SQP for finite-step B-stationarity — (L) · *priority 18 (research)*
+
+MPECopt (Nurkanović et al., 2024) achieves *finite-step* B-stationarity
+by enumerating active-set branches over the biactive set and solving
+each branch as an equality-constrained QP, with explicit M- and
+B-stationarity certificates per branch.  This is currently the
+strongest published convergence guarantee for MPCCs, and no commercial
+solver ships it.  pympcc has a B-stationarity *certifier* (§2.2) but
+no solver that targets B-stationarity by design.
+
+Sketch:
+
+1. Solve a relaxation strategy to obtain a candidate `x*` and biactive
+   estimate `Î_00`.
+2. Enumerate `2^|Î_00|` leaf NLPs, each fixing a (G-active, H-≥0) or
+   (H-active, G-≥0) assignment per pair.
+3. Solve each leaf via SQP / IPOPT; the minimum-objective leaf with a
+   feasible KKT system is B-stationary.
+4. Reuse the §2.2 LP machinery for branch enumeration (already
+   implemented and tested).
+
+Synergy with the planned **pyfiltersqp** project (memory: SQP solver at
+`../pyfiltersqp`): once that ships, MPECopt becomes natural to host as
+a pympcc strategy backed by pyfiltersqp leaves.
+
+Module: `pympcc/strategies/piecewise_sqp.py`.
+
+### 3.9. Raghunathan-Biegler IPOPT-C — (L) · *priority 19 (deferred)*
+
+An interior-point method that modifies IPOPT's barrier loop to handle
+complementarity *natively* (simultaneous σ-τ updates inside the IP
+iteration) rather than as an outer ε-continuation.  Faster on highly
+degenerate problems where Scholtes / FB stall.
+
+Requires a fork of cyipopt's barrier callbacks or a custom barrier
+loop.  High effort with uncertain practical payoff vs the existing
+strategies; deferred until a real degenerate test case demands it.
+
+Module: hypothetical `pympcc/strategies/ipopt_c.py`.
 
 ### 3.6. Adaptive penalty escalation — (S)
 
@@ -537,22 +654,83 @@ Module: `pympcc/_nlp.py` (`_invoke_inner_callback`,
 `__init__`; surface in `pympcc/solver.py`.
 Tests: `tests/test_inner_callback.py` (10 cases).
 
+### 4.9. Box-MCP / doubly-bounded canonical form — (M) · *priority 11* · *Phase 1 ✅ shipped, Phase 2 planned*
+
+PATH's canonical form is
+
+    ℓ ≤ x ≤ u  ⊥  F(x)
+
+which generalises the AMPL `complements` operator's three-way sign
+convention: `F(x)` may be `≥ 0` (when `x = ℓ`), `= 0` (when
+`ℓ < x < u`), or `≤ 0` (when `x = u`).  This is the standard MCP form
+used in economic-equilibrium and game-theory models.
+
+`MPCCProblem` accepts a `comp_box_pairs` field: list of
+`(var_idx, F_fn)` or `(var_idx, F_fn, F_jac_fn)` tuples interpreted
+with respect to the variable's `[xl, xu]` box.  Behaviour by bound
+finiteness:
+
+* **Lower-only** (`xl[j]` finite, `xu[j] = +∞`) ✅ shipped — appends
+  `(x − ℓ) ≥ 0 ⊥ F(x)` as a standard `comp_G` / `comp_H` row;
+  `n_comp` auto-bumps.
+* **Upper-only** (`xl[j] = −∞`, `xu[j]` finite) ✅ shipped — appends
+  `(u − x) ≥ 0 ⊥ −F(x)` (sign-flipped).
+* **Free** (both infinite) ✅ shipped — appends `F(x) = 0` to the eq
+  block (constrained nonlinear system); `n_eq` auto-bumps.
+* **Doubly-bounded** (both finite) — Phase 2 planned: median NCP
+  `median(x − ℓ, x − u, F(x)) = 0` (see §3.5 ext).  Currently raises
+  `NotImplementedError` with a clear message.
+
+Phase-1 limitations (revisited in Phase 2): `comp_box_pairs` is
+mutually exclusive with `comp_var_pairs` / `comp_var_pairs_bulk`;
+sparse base `comp_G_jacobian_sparsity` and sparse `eq_jacobian_sparsity`
+are rejected (the helper builds dense rows).
+
+Composes with `derivatives="jax"` / `"fd"` and with all existing
+strategies — each strategy sees the standard `comp_G` / `comp_H` /
+eq rows after expansion; box-handling lives in
+`MPCCProblem._normalize_box_pairs`.
+
+Module: `pympcc/problem.py` — `comp_box_pairs` field +
+`_normalize_box_pairs`, `_extend_comp_with_box`, `_extend_eq_with_free`.
+Tests: `tests/test_box_mcp.py` (21 cases).
+
 ---
 
 ## 5. Bilevel / parametric extensions
 
-### 5.1. Parametric sensitivity (sIPOPT-style) — (M)
+### 5.1. Parametric sensitivity (sIPOPT-style) ✅ *(shipped)*
 
-Compute `dx*/dp` for parameters `p` entering the MPCC.  Directly
-applicable to hyperparameter learning (the bilevel TV use case): the
-outer-loop gradient becomes a single linear solve at the inner-loop
-optimum instead of unrolled differentiation.
+`pympcc.sensitivity(result, problem, *, dgrad_L_dp, dc_dp, ...)` — a
+low-level KKT-linear-solve primitive returning `dx*/dp` and `dλ*/dp` at
+a converged MPCC solution by implicit differentiation through the TNLP
+active set.  Solves the saddle-point system
 
-Requires the KKT system at `x*` (already available from IPOPT) and
-implicit-function differentiation through the active set.
+    ┌ ∇²_xx L   J_cᵀ ┐ ┌ dx*/dp ┐     ┌ ∂(∇_x L)/∂p ┐
+    │                │ │        │ = − │              │
+    └ J_c       0    ┘ └ dλ*/dp ┘     └ ∂c/∂p       ┘
 
-Module: `pympcc/sensitivity.py`.  API: `pympcc.sensitivity(result,
-dp, ...)`.
+reusing the §2.3 Hessian builder for `∇²_xx L` and the §2.1 active-set
+machinery for `J_c`.  Picks up TNLP-refined multipliers (§2.6)
+automatically when `tnlp_refine=True` was passed to `solve()`; falls
+back to zero multipliers with a `UserWarning` otherwise (exact only
+when constraints are linear in `x`).  Skips cleanly with
+`skipped_reason` populated when the result is non-converged or has
+biactive pairs (IFT requires LICQ).
+
+Companion helper `pympcc.active_row_labels(result, problem)` returns
+the per-row labels (`("h", k)` / `("G", i)` / `("H", i)` / `("g", j)`
+/ `("xL"|"xU", j)`) the caller's `dc_dp` rows must follow.
+
+Designed as the substrate §5.6 will hook into via `jax.custom_vjp`.
+The high-level convenience that builds `dgrad_L_dp` / `dc_dp`
+automatically from JAX-traceable parametric callables is deferred to
+§5.6.
+
+Module: `pympcc/sensitivity.py`.
+Tests: `tests/test_sensitivity.py` (17 cases).
+API: `pympcc.sensitivity`, `pympcc.SensitivityResult`,
+`pympcc.active_row_labels`.
 
 ### 5.2. Multiplier warm-start ✅ *(shipped)*
 
@@ -571,7 +749,8 @@ Module: `pympcc/strategies/_base.py` — `_run_epsilon_continuation`,
 ### 5.3. EPEC / VI extension — (L)
 
 Equilibrium problems with equilibrium constraints; out of scope for
-the SIAM imaging paper but a natural follow-up.
+the SIAM imaging paper but a natural follow-up.  Concrete first step
+tracked under §5.5.
 
 ### 5.4. Bilevel KKT-emitter frontend ✅ *(shipped)*
 
@@ -610,7 +789,90 @@ differences (acceptable for prototyping).  No new dependencies.
 Module: `pympcc/bilevel.py`.
 Tests: `tests/test_bilevel.py` (23 cases).
 
----
+### 5.5. EPEC multi-leader emitter — (M) · *priority 16*
+
+Generalises §5.4 to *multiple* leaders sharing variables.  An EPEC
+
+```
+For each leader i:
+    min_{x_i, y}  F_i(x_i, x_{-i}, y)
+    s.t.          y ∈ argmin_y { f(x, y) : g(x, y) ≤ 0 }
+```
+
+is reformulated by emitting each leader's MPCC KKT conditions and
+concatenating, producing a single large MPCC over
+`(x_1, …, x_n, y, λ_lower, μ_leaders)`.  This is the GAMS EMP
+"equilibrium" pattern; commercial coverage is thin (only EMP/NLPEC
+ships it directly).
+
+API:
+
+```python
+mpcc = pympcc.bilevel.from_epec(
+    leaders=[
+        pympcc.bilevel.Leader(F=..., g=..., h=...),
+        pympcc.bilevel.Leader(F=..., g=..., h=...),
+    ],
+    common_lower=pympcc.bilevel.LowerLevel(f=..., g=..., h=...),
+    derivatives="jax",
+)
+```
+
+Reuses §5.4 KKT-emitter machinery; the new code is mostly bookkeeping
+for stitching leader blocks.
+
+Module: extension to `pympcc/bilevel.py` (new `Leader` /
+`from_epec` API).  Test set: standard MacEPEC instances.
+
+### 5.6. JAX-differentiable solve via custom_vjp — (M) · ✅ shipped
+
+Distinct from §5.1: §5.1 is *parametric sensitivity* returning `dx*/dp`
+on demand.  This item is the **autograd integration**: register
+`pympcc.solve` (or `pympcc.solve_jvp`) with `jax.custom_vjp` so that
+JAX can differentiate *through* a converged MPCC solve transparently.
+
+Implementation reuses the §5.1 KKT linear solve, but exposes it as
+`jax.numpy`-compatible primitives so an MPCC sits inside a JAX
+neural-network pipeline.  Differentiation goes through the **TNLP-
+refined active set** (§2.6) so the LICQ assumption holds; degenerate
+cases fall back to a Tikhonov-regularised pseudo-inverse with a
+documented warning.
+
+Why this matters: every commercial MPCC solver (KNITRO, PATH, BARON,
+LINDO) treats the solve as a black box.  Among open-source codes, only
+DiffMPC / mpc.pytorch differentiate through MPC, and they require
+*linear-quadratic* problems.  Differentiable *general* MPCC is a niche
+no other solver currently owns — and pympcc already has JAX as a first-
+class dependency, making this a uniquely cheap differentiator.
+
+API sketch:
+
+```python
+@jax.jit
+def loss(theta):
+    problem = build_mpcc(theta)            # JAX-traceable problem
+    result = pympcc.solve(problem)         # custom_vjp-registered
+    return objective(result.x, theta)
+
+grad = jax.grad(loss)(theta)               # works
+```
+
+Module: `pympcc/_autodiff.py` (new); registration in
+`pympcc/__init__.py`.  Depends on §2.6 TNLP refinement and §5.1
+sensitivity primitives.
+
+**Phase-1 scope shipped.** `pympcc.ParametricMPCC` carries the
+parametric `(x, theta)` callables; `pympcc.solve_jax(parametric,
+theta, *, x0, strategy=...)` is registered as `jax.custom_vjp`.
+Forward materialises an `MPCCProblem` (closing `theta` into the
+callables) and runs `pympcc.solve(..., tnlp_refine=True)`; backward
+solves the §5.1 KKT saddle system once and contracts via
+`jax.vjp` on the parametric callables, so pytree θ shapes pass
+through unchanged.  `jax.grad` works; `jax.jacrev` is **not**
+supported in Phase-1 (its internal `vmap` traces the NumPy/IPOPT
+bwd) — assemble Jacobians per-row via `jax.grad` instead.
+Phase-2 (`custom_jvp` for forward-mode, θ-dependent bounds, jit-
+compatibility) deferred.
 
 ---
 
@@ -706,6 +968,86 @@ Output: Leyffer-style results table (problem, strategy, f_opt_gap,
 comp_residual, CQ_class, stationarity, n_iter, time) for paper figures.
 
 CLI (planned): `python -m pympcc.benchmarks.macmpec --from-nl path/`.
+
+### 6.5. Stateful warm hot-start solver object — (M) · *priority 12*
+
+Today `MPCCSolver.solve()` is one-shot.  For MPC rolling-horizon control,
+parametric continuation, and outer hyperparameter loops, the dominant
+cost is *reconstruction*: building the NLP, factoring KKT once, refining
+multipliers.  Repeated solves on near-identical problems should reuse:
+
+* Last `x*`, `λ*`, `μ*` (multipliers for `g`, `h`, `G`, `H`).
+* Last barrier parameter `μ` and step `α` from IPOPT.
+* Active-set summary from §2.6 TNLP refinement.
+* Presolve `PresolveMap` (when problem dimensions are stable).
+* Optionally, the IPOPT internal state via cyipopt's `solve()` reuse.
+
+API:
+
+```python
+solver = pympcc.MPCCSolver(problem, ...)
+result_0 = solver.solve()            # cold
+problem_1 = update_parameters(...)   # change F(x; θ_1)
+result_1 = solver.resolve(problem_1) # warm — reuses x*, λ*, μ
+```
+
+`solver.resolve()` validates that the *structure* (n, m, sparsity) is
+unchanged; only numeric values may differ.  Falls back to cold start if
+structure changed.  `result_k.warmstart_savings_iter` reports how many
+inner iterations were saved vs the cold baseline.
+
+This is the canonical KNITRO / PATH usage pattern for repeated solves
+and unblocks pympcc as an MPC inner solver.
+
+Module: extension to `pympcc/solver.py` (`MPCCSolver.resolve()`,
+state-retention struct).
+
+### 6.6. NLPEC modifier matrix — (M) · *priority 17*
+
+GAMS-NLPEC's 33-row `equreform` is built from the cross-product of
+~6 NCP functions × 4 slack types (`none` / `free` / `positive` / `one`)
+× 2 constraint types (`eq` / `ineq`) × 3 aggregate levels × 4 NCPBounds
+levels.  pympcc currently treats each row as a separate strategy class.
+
+Refactor to expose the modifiers as orthogonal options:
+
+```python
+result = pympcc.solve(
+    problem,
+    strategy="ncp",
+    ncp_function="fischer-burmeister",   # or "min", "ChenChenKanzow", …
+    slack="positive",                     # how G, H rows are slack-lifted
+    constraint="ineq",                    # phi(G,H) ≤ ε vs phi(G,H) = ε
+    aggregate="partial",                  # collapse rows of φ
+    ncp_bounds="all",                     # auto-bounds inferred for slacks
+)
+```
+
+Yields ~12-20 *effective* reformulations from the existing NCP code with
+no new theory.  Strategies become thin: pure orchestration over a single
+"NCP-reformulation builder" that consumes the modifier dict.
+
+Module: refactor of `pympcc/strategies/_base.py` and
+`pympcc/strategies/ncp.py`; new `pympcc/_reformulation.py` builder.
+
+### 6.7. Reformulated-NLP dump — (S)
+
+NLPEC's `dotGams` writes the reformulated NLP to a file for inspection
+(`m.lst` / `m.gms`).  pympcc users currently have no way to see the NLP
+that IPOPT actually solves after a strategy reformulation has been
+applied — useful for debugging and for cross-solver comparison.
+
+Targets:
+
+* `result.dump_reformulated_nlp(path, format="nl")` — writes the
+  reformulated problem as an AMPL `.nl` file (reusing §6.4
+  infrastructure in reverse).
+* `format="pyomo"` — emits a `pyomo.ConcreteModel` for users who want
+  to introspect or re-solve via a different backend.
+* `MPCCSolver(..., dump_nlp_path=...)` — auto-dump on solve.
+
+Module: new `pympcc/_dump.py`; `.nl` writer is the inverse of the
+existing `pympcc.frontend.ampl` reader.
 
 ---
 

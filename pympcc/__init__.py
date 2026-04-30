@@ -23,8 +23,16 @@ Quickstart
 """
 
 from . import bilevel
+from ._autodiff import ParametricMPCC, solve_jax
 from ._autoscale import autoscale_comp_pairs
-from ._diagnostics import active_sets, classify_cq
+from ._diagnostics import (
+    active_sets,
+    classify_cq,
+    degeneracy_report,
+    initial_point_statistics,
+    jac_norms,
+    merit_cross_check,
+)
 from ._presolve import PresolveMap, presolve
 from ._sosc import sosc_check
 from ._stationarity import (
@@ -37,6 +45,7 @@ from .models import StructuredMPCC
 from .multistart import MultiStartResult, multistart
 from .problem import MPCCProblem
 from .result import IPOPTStatus, IterationInfo, MPCCResult, unscale_multipliers
+from .sensitivity import SensitivityResult, active_row_labels, sensitivity
 from .solver import MPCCSolver, solve
 
 __all__ = [
@@ -49,6 +58,10 @@ __all__ = [
     "solve",
     "active_sets",
     "classify_cq",
+    "merit_cross_check",
+    "jac_norms",
+    "degeneracy_report",
+    "initial_point_statistics",
     "sosc_check",
     "classify_stationarity",
     "compute_kkt_residual",
@@ -60,6 +73,11 @@ __all__ = [
     "multistart",
     "MultiStartResult",
     "TNLPResult",
+    "sensitivity",
+    "SensitivityResult",
+    "active_row_labels",
+    "ParametricMPCC",
+    "solve_jax",
     "bilevel",
 ]
 __version__ = "0.4.3"

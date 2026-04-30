@@ -11,6 +11,115 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+**JAX-differentiable solve (§5.6)**
+- New :class:`pympcc.ParametricMPCC` dataclass — a parametric problem
+  description whose ``objective``, ``eq_constraints``,
+  ``ineq_constraints``, ``comp_G``, ``comp_H`` callables take
+  ``(x, theta)`` with JAX-traceable bodies.  ``materialise(theta, x0)``
+  closes ``theta`` and returns an :class:`MPCCProblem` with
+  ``derivatives="jax"``.
+- New :func:`pympcc.solve_jax(parametric, theta, *, x0, strategy=...,
+  **solve_kwargs)` registered as ``jax.custom_vjp``: forward calls
+  :func:`pympcc.solve` with ``tnlp_refine=True`` (§2.6); backward
+  performs an sIPOPT-style adjoint solve of the KKT saddle system
+  ``K·[u; w] = [v; 0]`` once and returns ``θ̄ = −(uᵀ ∂(∇_xL)/∂θ +
+  wᵀ ∂c/∂θ)`` via :func:`jax.vjp` on the parametric callables, so
+  pytree θ shapes pass through.
+- Skip behaviour mirrors :func:`pympcc.sensitivity`: returns a
+  zero θ-cotangent with a ``UserWarning`` when the forward solve
+  fails to converge or the optimum is biactive (IFT prerequisites
+  invalid).
+- Public exports: ``pympcc.ParametricMPCC``, ``pympcc.solve_jax``.
+- 11 new tests in ``tests/test_autodiff.py`` covering forward-only
+  parity with :func:`pympcc.solve`, closed-form gradient on a
+  parametric equality NLP, FD verification of ``jax.grad`` and the
+  full ``dx*/dθ`` Jacobian (assembled per-row via :func:`jax.grad`),
+  the biactive skip path, and the documented incompatibility with
+  :func:`jax.jit`.
+
+**Parametric sensitivity analysis (§5.1)**
+- New module :mod:`pympcc.sensitivity` exposing
+  ``pympcc.sensitivity(result, problem, *, dgrad_L_dp, dc_dp, ...)`` —
+  a low-level KKT-linear-solve primitive that returns ``dx*/dp`` and
+  ``dλ*/dp`` at a converged MPCC solution by implicit differentiation.
+- Solves the saddle-point system ``[[H, J_cᵀ], [J_c, 0]] · [dx; dλ] =
+  −[dgrad_L_dp; dc_dp]`` where ``H`` is the Lagrangian Hessian (reusing
+  the §2.3 Hessian builder) and ``J_c`` is the active-constraint
+  Jacobian (reusing the §2.1 active-set machinery).
+- Skips with ``skipped_reason`` set when MPCC-LICQ prerequisites fail:
+  ``"not_converged"`` (failed result), ``"biactive_pairs"`` (IFT
+  invalid at biactive points), or
+  ``"no_hessian_callable_and_fd_failed"`` (FD fallback raised).
+- Tikhonov-regularised ``lstsq`` fallback when the dense KKT solve
+  fails; ``rank_deficit`` and ``used_pseudoinverse`` flags surface the
+  fallback path.
+- Companion helper ``pympcc.active_row_labels(result, problem)`` returns
+  the per-row labels (``("h", k)`` / ``("G", i)`` / ``("H", i)`` /
+  ``("g", j)`` / ``("xL"|"xU", j)``) the caller's ``dc_dp`` rows must
+  follow, so users can assemble the RHS without first running a
+  sensitivity solve.
+- Picks up TNLP-refined multipliers (§2.6) automatically when
+  ``tnlp_refine=True`` was passed to :func:`pympcc.solve`; falls back
+  to zero multipliers with a ``UserWarning`` when no analytic Hessian
+  is available (the fallback is exact only when constraints are linear
+  in ``x``).
+- Public exports: ``pympcc.sensitivity``, ``pympcc.SensitivityResult``,
+  ``pympcc.active_row_labels``.
+- 17 new tests in ``tests/test_sensitivity.py`` covering closed-form
+  IFT on a parametric equality NLP, end-to-end FD verification on a
+  branch-selection MPCC (single- and multi-parameter), shape validation,
+  TNLP-vs-zero-multiplier paths, and skipped-result paths.
+
+**PATH-style multi-merit & degeneracy diagnostics (§2.7)**
+- New `result.merit_cross_check` (dict) cross-checks three independent
+  MPCC merit functions at the converged point: Fischer-Burmeister
+  `|G + H − √(G² + H²)|`, min-map `|min(G, H)|`, and inner-product
+  `|G · H|`.  Reports per-merit `*_max` and `*_mean`, plus a
+  `disagreement_ratio = max / min(merit_maxes)` — close to 1 when
+  merits agree (healthy convergence), large when they disagree
+  (scaling mismatch or near-degeneracy).
+- New `result.jac_row_norms` / `result.jac_col_norms` (dicts) report
+  `max`, `min`, and near-zero count over the active-constraint
+  Jacobian (rows: ∇h, ∇G_{I_G}, ∇H_{I_H}, ∇g_{I_g}, active bounds).
+  Near-zero rows/cols are degeneracy signals.
+- New `result.degeneracy_report` (dict) aggregates `n_biactive`,
+  `n_zero_rows`, `n_zero_cols`, `min_singular_value` of the active
+  Jacobian, and the merit disagreement ratio for one-glance assessment.
+- New `result.initial_point_stats` (dict) — PATH's
+  `output_initial_point_statistics` parity: reports `comp_residual`,
+  `min_map_residual`, `max_bound_violation`, `ineq_residual`, and
+  `eq_residual` evaluated at the user's `x0` *before* any solve work.
+- All five fields are populated only when the solver is invoked with
+  `diagnostics=True`; default solves are unchanged (no overhead).
+- `result.summary(verbosity=1)` now renders a "Merit cross-check" line
+  and a "Degeneracy" line whenever those diagnostics are populated.
+- `result.to_json()` includes all five new fields.
+- Public functions exported at the package root:
+  `pympcc.merit_cross_check`, `pympcc.jac_norms`,
+  `pympcc.degeneracy_report`, `pympcc.initial_point_statistics`.
+- 18 new tests in `tests/test_path_diagnostics.py` covering each merit's
+  formula, empty-problem handling, biactive detection, end-to-end solve
+  with diagnostics on/off, JSON roundtrip, and summary rendering.
+
+**Box-MCP / doubly-bounded canonical form (§4.9 — Phase 1)**
+- New `comp_box_pairs` field on `MPCCProblem` declares
+  `xl[var_idx] <= x[var_idx] <= xu[var_idx]  ⊥  F_fn(x)` and dispatches
+  by bound finiteness:
+  - **Lower-only finite** → comp pair `(x[var_idx] - xl) >= 0  ⊥  F(x) >= 0`.
+  - **Upper-only finite** → comp pair `(xu - x[var_idx]) >= 0  ⊥  -F(x) >= 0`.
+  - **Free** (both infinite) → equality `F(x) = 0` appended to `eq_constraints`.
+  - **Doubly-bounded** (both finite) → `NotImplementedError` pointing to
+    §4.9 Phase 2 / median NCP (§3.5 ext).
+- `n_comp` and `n_eq` are auto-bumped to count synthesized rows; users
+  supply `n_comp` / `n_eq` for the *base* problem only.
+- 2-tuple `(var_idx, F_fn)` form falls back to forward fd for the F-row
+  Jacobian; 3-tuple `(var_idx, F_fn, F_jac_fn)` uses the user callable.
+- Mutually exclusive with `comp_var_pairs` and `comp_var_pairs_bulk` in
+  this release.  Sparse base `comp_G/H` and sparse `eq_jacobian` are
+  rejected (deferred).
+- 21 new tests in `tests/test_box_mcp.py` covering all three categories,
+  mixed combination, fd fallback, and every error path.
+
 **AMPL `.nl` reader (§6.4)**
 - New `pympcc.frontend.ampl` module — a self-contained text-format `.nl`
   reader that produces an `MPCCProblem` directly.  No external AMPL

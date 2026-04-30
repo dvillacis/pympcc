@@ -164,6 +164,14 @@ class MPCCResult:
     # set and the outer loop terminated early because of it; the returned
     # iterate is the best feasible incumbent seen up to that point.
     time_limit_hit: bool = False
+    # PATH-style multi-merit & degeneracy diagnostics (§2.7).  Populated
+    # when the solver is invoked with ``diagnostics=True``.  See
+    # :mod:`pympcc._diagnostics` for the dict schemas.
+    merit_cross_check: Optional[dict] = None
+    jac_row_norms: Optional[dict] = None
+    jac_col_norms: Optional[dict] = None
+    degeneracy_report: Optional[dict] = None
+    initial_point_stats: Optional[dict] = None
 
     def unscale_comp_multipliers(
         self,
@@ -216,6 +224,11 @@ class MPCCResult:
             "cq_rank_deficit": self.cq_rank_deficit,
             "b_stationary": self.b_stationary,
             "solve_time": self.solve_time,
+            "merit_cross_check": self.merit_cross_check,
+            "jac_row_norms": self.jac_row_norms,
+            "jac_col_norms": self.jac_col_norms,
+            "degeneracy_report": self.degeneracy_report,
+            "initial_point_stats": self.initial_point_stats,
         }
         if self.tnlp_refined is not None:
             tnlp = self.tnlp_refined
@@ -346,6 +359,26 @@ class MPCCResult:
             parts = [f"|I_{k}|={v}" for k, v in sizes.items()]
             lines.append("  Active set:")
             lines.append("    " + ", ".join(parts))
+
+        if self.merit_cross_check is not None:
+            mc = self.merit_cross_check
+            lines.append("  Merit cross-check (max-norms):")
+            lines.append(
+                f"    FB={mc['fb_max']:.3e}, "
+                f"min-map={mc['min_map_max']:.3e}, "
+                f"G·H={mc['inner_product_max']:.3e}, "
+                f"disagreement={mc['disagreement_ratio']:.2f}"
+            )
+        if self.degeneracy_report is not None:
+            dr = self.degeneracy_report
+            min_sv = dr.get("min_singular_value")
+            min_sv_s = f"{min_sv:.3e}" if isinstance(min_sv, float) else "n/a"
+            lines.append(
+                f"  Degeneracy: biactive={dr.get('n_biactive')}, "
+                f"zero-rows={dr.get('n_zero_rows')}, "
+                f"zero-cols={dr.get('n_zero_cols')}, "
+                f"σ_min={min_sv_s}"
+            )
 
         perf_lines: list[str] = []
         if self.solve_time is not None:

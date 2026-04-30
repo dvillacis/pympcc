@@ -8,7 +8,11 @@ import numpy as np
 
 from ._autoscale import autoscale_comp_pairs as _autoscale_comp_pairs
 from ._diagnostics import classify_cq as _classify_cq
+from ._diagnostics import degeneracy_report as _degeneracy_report
+from ._diagnostics import initial_point_statistics as _initial_point_stats
 from ._diagnostics import jac_condition_number as _jac_cond
+from ._diagnostics import jac_norms as _jac_norms
+from ._diagnostics import merit_cross_check as _merit_cross_check
 from ._kernels import HAS_NUMBA
 from ._presolve import presolve as _presolve
 from ._sosc import sosc_check as _sosc_check
@@ -319,6 +323,13 @@ class MPCCSolver:
         result.sosc_skipped_reason = sc["skipped_reason"]
         result.hessian_condition_estimate = sc.get("cond_W")
         result.jac_condition = _jac_cond(result, self.problem_orig)
+        # §2.7 — PATH-style multi-merit & degeneracy diagnostics.
+        result.merit_cross_check = _merit_cross_check(result, self.problem_orig)
+        jn = _jac_norms(result, self.problem_orig)
+        result.jac_row_norms = jn["row"]
+        result.jac_col_norms = jn["col"]
+        result.degeneracy_report = _degeneracy_report(result, self.problem_orig)
+        result.initial_point_stats = _initial_point_stats(self.problem_orig)
 
     @staticmethod
     def _attach_per_pair_status(result: MPCCResult) -> None:

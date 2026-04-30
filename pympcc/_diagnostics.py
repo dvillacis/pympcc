@@ -24,7 +24,18 @@ from ._stationarity import _dense_jac
 from .problem import MPCCProblem
 from .result import MPCCResult
 
-__all__ = ["classify_cq", "active_sets", "jac_condition_number"]
+__all__ = [
+    "classify_cq",
+    "active_sets",
+    "jac_condition_number",
+    "merit_cross_check",
+    "jac_norms",
+    "initial_point_statistics",
+    "degeneracy_report",
+]
+
+
+_ZERO_NORM_TOL = 1e-10
 
 
 def active_sets(
@@ -354,3 +365,223 @@ def jac_condition_number(
     if M.size == 0:
         return None
     return float(np.linalg.cond(M))
+
+
+# --------------------------------------------------------------------------- #
+# §2.7 — PATH-style multi-merit & degeneracy diagnostics                       #
+# --------------------------------------------------------------------------- #
+
+def _fischer_burmeister(G: np.ndarray, H: np.ndarray) -> np.ndarray:
+    """Pointwise Fischer-Burmeister residual ``a + b − sqrt(a² + b²)``."""
+    return G + H - np.sqrt(G * G + H * H)
+
+
+def merit_cross_check(
+    result: MPCCResult,
+    problem: MPCCProblem,
+) -> dict:
+    """Cross-check three independent MPCC merit functions at ``result.x``.
+
+    Disagreement between merits localises numerical trouble: one merit
+    can mask issues another exposes (PATH ships this cross-check at
+    termination time).  All three should be comparable in magnitude on a
+    healthy converged point.
+
+    Returns a dict with:
+
+    * ``fb_max`` / ``fb_mean`` — `|G + H − √(G² + H²)|` (Fischer-Burmeister).
+    * ``min_map_max`` / ``min_map_mean`` — `|min(G, H)|` (min-map).
+    * ``inner_product_max`` / ``inner_product_mean`` — `|G · H|` (matches
+      ``result.comp_residual`` / ``result.comp_residual_mean``).
+    * ``disagreement_ratio`` — `max / min` of the three max-norms after
+      flooring the denominator at ``1e-16`` (ratio close to 1 ⇒ merits
+      agree; large ratio ⇒ scaling mismatch or ill-conditioning).
+    """
+    G = np.asarray(result.G, dtype=float)
+    H = np.asarray(result.H, dtype=float)
+    if G.size == 0:
+        return {
+            "fb_max": 0.0, "fb_mean": 0.0,
+            "min_map_max": 0.0, "min_map_mean": 0.0,
+            "inner_product_max": 0.0, "inner_product_mean": 0.0,
+            "disagreement_ratio": 1.0,
+        }
+    fb = np.abs(_fischer_burmeister(G, H))
+    mm = np.abs(np.minimum(G, H))
+    ip = np.abs(G * H)
+
+    fb_max = float(np.max(fb))
+    mm_max = float(np.max(mm))
+    ip_max = float(np.max(ip))
+    norms = np.array([fb_max, mm_max, ip_max])
+    denom = max(float(np.min(norms)), 1e-16)
+    return {
+        "fb_max":              fb_max,
+        "fb_mean":             float(np.mean(fb)),
+        "min_map_max":         mm_max,
+        "min_map_mean":        float(np.mean(mm)),
+        "inner_product_max":   ip_max,
+        "inner_product_mean":  float(np.mean(ip)),
+        "disagreement_ratio":  float(np.max(norms) / denom),
+    }
+
+
+def jac_norms(
+    result: MPCCResult,
+    problem: MPCCProblem,
+    *,
+    tol: float = 1e-6,
+    zero_tol: float = _ZERO_NORM_TOL,
+) -> dict:
+    """Row- and column-norm summary of the active-constraint Jacobian.
+
+    Builds the same active-gradient stack used by :func:`classify_cq`
+    (rows: equality, comp G/H on the active sides, active inequality,
+    active variable bounds) and returns row/column norm extrema plus
+    near-zero counts.
+
+    Near-zero rows or columns are usually degeneracy signals (a row at
+    norm ≈ 0 contributes no constraint information at the iterate; a
+    column at norm ≈ 0 means a variable has no influence on any active
+    constraint).
+
+    Returns
+    -------
+    dict
+        ``{
+            "row": {"max": …, "min": …, "n_zero": …, "n_rows": …},
+            "col": {"max": …, "min": …, "n_zero": …, "n_cols": …},
+        }``
+
+    Returns empty dicts under each key when the active matrix is empty
+    or the result did not converge.
+    """
+    empty = {
+        "row": {"max": None, "min": None, "n_zero": 0, "n_rows": 0},
+        "col": {"max": None, "min": None, "n_zero": 0, "n_cols": 0},
+    }
+    if not result.success:
+        return empty
+    sets = active_sets(result, problem, tol=tol)
+    x = np.asarray(result.x, dtype=float)
+    M, _ = _stack_active_gradient_matrix(problem, x, sets)
+    if M.size == 0:
+        return empty
+    row_n = np.linalg.norm(M, axis=1)
+    col_n = np.linalg.norm(M, axis=0)
+    return {
+        "row": {
+            "max":    float(np.max(row_n)),
+            "min":    float(np.min(row_n)),
+            "n_zero": int(np.sum(row_n <= zero_tol)),
+            "n_rows": int(M.shape[0]),
+        },
+        "col": {
+            "max":    float(np.max(col_n)),
+            "min":    float(np.min(col_n)),
+            "n_zero": int(np.sum(col_n <= zero_tol)),
+            "n_cols": int(M.shape[1]),
+        },
+    }
+
+
+def initial_point_statistics(problem: MPCCProblem) -> dict:
+    """Replicate PATH's ``output_initial_point_statistics`` at ``x0``.
+
+    Reports residuals at the user's starting point so the user sees the
+    starting state before any work has been done (a complementarity-
+    feasible ``x0`` often dramatically changes solver behaviour).
+
+    Returns a dict with:
+
+    * ``comp_residual`` — `max_i |G_i(x0) · H_i(x0)|`.
+    * ``min_map_residual`` — `max_i |min(G_i(x0), H_i(x0))|`.
+    * ``max_bound_violation`` — largest amount any ``x0[j]`` lies outside
+      ``[xl[j], xu[j]]`` (0 if feasible).
+    * ``ineq_residual`` — `max_j max(g_j(x0), 0)` (0 if feasible).
+    * ``eq_residual`` — `max_k |h_k(x0)|`.
+    """
+    p = problem
+    x0 = np.asarray(p.x0, dtype=float)
+    out: dict = {}
+    if p.comp_G is not None and p.comp_H is not None:
+        G0 = np.asarray(p.comp_G(x0), dtype=float)
+        H0 = np.asarray(p.comp_H(x0), dtype=float)
+        out["comp_residual"]    = float(np.max(np.abs(G0 * H0))) if G0.size else 0.0
+        out["min_map_residual"] = float(np.max(np.abs(np.minimum(G0, H0)))) if G0.size else 0.0
+    else:
+        out["comp_residual"] = 0.0
+        out["min_map_residual"] = 0.0
+    xl = np.asarray(p.xl, dtype=float) if p.xl is not None else np.full(p.n, -np.inf)
+    xu = np.asarray(p.xu, dtype=float) if p.xu is not None else np.full(p.n,  np.inf)
+    lo_v = np.where(np.isfinite(xl), np.maximum(xl - x0, 0.0), 0.0)
+    hi_v = np.where(np.isfinite(xu), np.maximum(x0 - xu, 0.0), 0.0)
+    out["max_bound_violation"] = float(np.max(np.concatenate([lo_v, hi_v])))
+    if p.n_ineq and p.ineq_constraints is not None:
+        g0 = np.asarray(p.ineq_constraints(x0), dtype=float)
+        out["ineq_residual"] = float(np.max(np.maximum(g0, 0.0))) if g0.size else 0.0
+    else:
+        out["ineq_residual"] = 0.0
+    if p.n_eq and p.eq_constraints is not None:
+        h0 = np.asarray(p.eq_constraints(x0), dtype=float)
+        out["eq_residual"] = float(np.max(np.abs(h0))) if h0.size else 0.0
+    else:
+        out["eq_residual"] = 0.0
+    return out
+
+
+def degeneracy_report(
+    result: MPCCResult,
+    problem: MPCCProblem,
+    *,
+    tol: float = 1e-6,
+    zero_tol: float = _ZERO_NORM_TOL,
+) -> dict:
+    """Combined degeneracy summary at ``result.x``.
+
+    Aggregates signals already produced by :func:`active_sets`,
+    :func:`jac_norms`, and :func:`merit_cross_check` into a single
+    structured dict for one-glance health assessment.
+
+    Returns
+    -------
+    dict
+        ``n_biactive`` — biactive-pair count |I_00|.
+        ``n_zero_rows`` — rows of the active Jacobian at norm ≤ zero_tol.
+        ``n_zero_cols`` — columns at norm ≤ zero_tol.
+        ``min_singular_value`` — smallest singular value of the active
+        Jacobian (None when active matrix is empty / not converged).
+        ``merit_disagreement_ratio`` — see :func:`merit_cross_check`.
+    """
+    if not result.success:
+        return {
+            "n_biactive": None,
+            "n_zero_rows": None,
+            "n_zero_cols": None,
+            "min_singular_value": None,
+            "merit_disagreement_ratio": None,
+        }
+    sets = active_sets(result, problem, tol=tol)
+    x = np.asarray(result.x, dtype=float)
+    M, _ = _stack_active_gradient_matrix(problem, x, sets)
+
+    if M.size:
+        s = np.linalg.svd(M, compute_uv=False)
+        min_sv = float(s[-1]) if s.size else None
+        row_n = np.linalg.norm(M, axis=1)
+        col_n = np.linalg.norm(M, axis=0)
+        n_zero_rows = int(np.sum(row_n <= zero_tol))
+        n_zero_cols = int(np.sum(col_n <= zero_tol))
+    else:
+        min_sv = None
+        n_zero_rows = 0
+        n_zero_cols = 0
+
+    mc = merit_cross_check(result, problem)
+    return {
+        "n_biactive":               int(sets["I_00"].size),
+        "n_zero_rows":              n_zero_rows,
+        "n_zero_cols":              n_zero_cols,
+        "min_singular_value":       min_sv,
+        "merit_disagreement_ratio": mc["disagreement_ratio"],
+    }
