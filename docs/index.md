@@ -35,6 +35,18 @@ user_guide/ampl_io
 ```
 
 ```{toctree}
+:maxdepth: 2
+:caption: Examples
+examples/index
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Theory primer
+theory/index
+```
+
+```{toctree}
 :maxdepth: 1
 :caption: Reference
 api/index

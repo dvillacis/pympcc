@@ -4,9 +4,11 @@ build:
   os: ubuntu-22.04
   tools:
     python: "3.11"
+  apt_packages:
+    - coinor-libipopt-dev
   jobs:
     post_install:
-      - pip install -e ".[docs,jax]"
+      - pip install -e ".[docs,jax,ipopt]"
 
 sphinx:
   configuration: docs/conf.py

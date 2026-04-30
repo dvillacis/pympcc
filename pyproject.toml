@@ -46,10 +46,11 @@ jax = ["jax>=0.4"]
 scipy = ["scipy>=1.10"]
 docs = [
     "sphinx>=7.3",
-    "myst-parser>=3.0",
+    "myst-nb>=1.1",
     "furo>=2024.5",
     "sphinx-copybutton>=0.5",
     "sphinx-autodoc-typehints>=2.0",
+    "matplotlib>=3.8",
 ]
 
 [build-system]

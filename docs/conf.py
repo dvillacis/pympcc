@@ -17,7 +17,7 @@ version = _version
 release = _version
 
 extensions = [
-    "myst_parser",
+    "myst_nb",                     # markdown + executable notebooks (also provides myst_parser)
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
     "sphinx.ext.napoleon",
@@ -27,6 +27,13 @@ extensions = [
     "sphinx_copybutton",
     "sphinx_autodoc_typehints",
 ]
+
+# -- myst-nb (executable notebooks) -------------------------------------------
+nb_execution_mode = "cache"        # only re-execute when source changes
+nb_execution_timeout = 90          # seconds per cell (IPOPT solves can be slow)
+nb_execution_excludepatterns = []
+nb_merge_streams = True
+nb_execution_raise_on_error = True
 
 myst_enable_extensions = [
     "amsmath",
@@ -38,10 +45,10 @@ myst_enable_extensions = [
 ]
 myst_heading_anchors = 3
 
-source_suffix = {
-    ".md": "markdown",
-    ".rst": "restructuredtext",
-}
+# Let myst-nb register the .md parser automatically (it provides
+# myst_parser internally).  Explicitly listing ``"markdown"`` here
+# breaks parser lookup because myst-nb registers under a different name.
+source_suffix = [".rst", ".md"]
 
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
