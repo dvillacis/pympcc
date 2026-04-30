@@ -9,7 +9,30 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+---
+
+## [0.5.0] - 2026-05-01
+
 ### Added
+
+**Sphinx documentation site**
+- New `docs/` tree with Furo theme, autodoc + autosummary API reference,
+  numpy-style docstring rendering, and intersphinx links to NumPy / JAX /
+  SciPy.  Built on every push by ReadTheDocs (`.readthedocs.yaml`).
+- Three executable notebooks under `docs/examples/` powered by
+  `myst-nb` (`bilevel_demo`, `solve_jax_demo`, `parametric_sweep`) — the
+  output blocks are produced from real solves on every build, so they
+  cannot drift from the code.
+- Theory primer under `docs/theory/` covering MPCC fundamentals, why
+  generic LICQ fails, MPCC-LICQ / MPCC-MFCQ, the S/M/C/A/W/B-stationarity
+  hierarchy, and MPCC-SOSC with the biactive critical-cone wedge.
+- User guide pages under `docs/user_guide/` covering problem setup,
+  strategies, diagnostics, sparse / slack form, sensitivity, autodiff,
+  bilevel, presolve / multistart, and AMPL I/O.
+- README slimmed to a one-page pitch with deep-links into the docs;
+  per-feature examples moved into the user guide.
+- `pyproject.toml` gains a `[docs]` extra (`sphinx`, `myst-nb`, `furo`,
+  `sphinx-copybutton`, `sphinx-autodoc-typehints`, `matplotlib`).
 
 **JAX-differentiable solve (§5.6)**
 - New :class:`pympcc.ParametricMPCC` dataclass — a parametric problem
@@ -171,6 +194,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   constraints were silently dropped from the NLP — affected ~12
   MacMPEC problems (`bard3`, `ex9.1.x`, `bilevel3`, etc.) that appeared
   to "solve" to unbounded objectives.
+
+### Tests
+
+- 1068 passed, 6 skipped, 54 xfailed (was 814 in 0.4.0).
 
 ---
 

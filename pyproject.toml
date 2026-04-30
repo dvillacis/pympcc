@@ -1,6 +1,6 @@
 [project]
 name = "pympcc"
-version = "0.4.3"
+version = "0.5.0"
 description = "Python solver for Mathematical Programs with Complementarity Constraints (MPCC) using IPOPT via cyipopt"
 readme = "README.md"
 license = { text = "MIT" }
