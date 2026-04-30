@@ -929,20 +929,20 @@ class MPCCProblem:
                     "(box-pair contributions are auto-counted)."
                 )
 
-            def _G(x, _li=lower_idx, _le=lower_ell, _ui=upper_idx, _uu=upper_u):
+            def _G_box(x, _li=lower_idx, _le=lower_ell, _ui=upper_idx, _uu=upper_u):
                 xv = np.asarray(x, dtype=float)
                 box_lower = (xv[_li] - _le) if _li.size else np.empty(0)
                 box_upper = (_uu - xv[_ui]) if _ui.size else np.empty(0)
                 return np.concatenate([box_lower, box_upper])
 
-            def _H(x, _lf=lower_F_fns, _uf=upper_F_fns):
+            def _H_box(x, _lf=lower_F_fns, _uf=upper_F_fns):
                 lower_vals = (np.array([np.asarray(f(x)).ravel()[0] for f in _lf])
                               if _lf else np.empty(0))
                 upper_vals = (-np.array([np.asarray(f(x)).ravel()[0] for f in _uf])
                               if _uf else np.empty(0))
                 return np.concatenate([lower_vals, upper_vals])
 
-            def _G_jac(x, _li=lower_idx, _ui=upper_idx, _nbox=n_box_comp, _n=n):
+            def _G_jac_box(x, _li=lower_idx, _ui=upper_idx, _nbox=n_box_comp, _n=n):
                 J = np.zeros((_nbox, _n))
                 for i in range(_li.size):
                     J[i, _li[i]] = 1.0
@@ -950,7 +950,7 @@ class MPCCProblem:
                     J[_li.size + i, _ui[i]] = -1.0
                 return J
 
-            def _H_jac(x, _lj=lower_F_jacs, _uj=upper_F_jacs, _nbox=n_box_comp, _n=n):
+            def _H_jac_box(x, _lj=lower_F_jacs, _uj=upper_F_jacs, _nbox=n_box_comp, _n=n):
                 J = np.zeros((_nbox, _n))
                 for i, jf in enumerate(_lj):
                     J[i, :] = np.asarray(jf(x), dtype=float).ravel()
@@ -958,10 +958,10 @@ class MPCCProblem:
                     J[len(_lj) + i, :] = -np.asarray(jf(x), dtype=float).ravel()
                 return J
 
-            self.comp_G = _G
-            self.comp_H = _H
-            self.comp_G_jacobian = _G_jac
-            self.comp_H_jacobian = _H_jac
+            self.comp_G = _G_box
+            self.comp_H = _H_box
+            self.comp_G_jacobian = _G_jac_box
+            self.comp_H_jacobian = _H_jac_box
 
         self.n_comp = n_base + n_box_comp
 
@@ -1014,17 +1014,17 @@ class MPCCProblem:
                     "contributions are auto-counted)."
                 )
 
-            def _eq(x, _ffs=free_F_fns):
+            def _eq_free(x, _ffs=free_F_fns):
                 return np.array([np.asarray(f(x)).ravel()[0] for f in _ffs])
 
-            def _eq_jac(x, _jfs=free_F_jacs, _nf=n_free, _n=n):
+            def _eq_jac_free(x, _jfs=free_F_jacs, _nf=n_free, _n=n):
                 J = np.zeros((_nf, _n))
                 for i, jf in enumerate(_jfs):
                     J[i, :] = np.asarray(jf(x), dtype=float).ravel()
                 return J
 
-            self.eq_constraints = _eq
-            self.eq_jacobian = _eq_jac
+            self.eq_constraints = _eq_free
+            self.eq_jacobian = _eq_jac_free
 
         self.n_eq = n_eq_base + n_free
 
