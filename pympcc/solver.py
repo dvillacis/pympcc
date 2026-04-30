@@ -8,6 +8,7 @@ import numpy as np
 
 from ._autoscale import autoscale_comp_pairs as _autoscale_comp_pairs
 from ._diagnostics import classify_cq as _classify_cq
+from ._diagnostics import jac_condition_number as _jac_cond
 from ._kernels import HAS_NUMBA
 from ._presolve import presolve as _presolve
 from ._sosc import sosc_check as _sosc_check
@@ -156,6 +157,13 @@ class MPCCSolver:
         inner iteration.  Return ``False`` to stop the inner solve early.
         ``info`` mirrors IPOPT's ``intermediate`` arguments.  Ignored by
         the ``'filterSQP'`` and ``'scipy'`` backends.
+    time_limit : float, optional
+        Wall-clock budget in seconds for the outer iterative loop.  When
+        the budget is exhausted the loop terminates and the best feasible
+        incumbent (smallest ``comp_residual`` among accepted iterates)
+        is returned with ``result.time_limit_hit = True``.  Does not
+        interrupt an in-flight inner NLP solve — use IPOPT's
+        ``max_cpu_secs`` for that.  Ignored by the ``'direct'`` strategy.
     verbose : bool, optional
         If ``True`` and no *callback* is provided, prints a formatted
         progress table to stdout after each outer iteration (default ``False``).
@@ -181,6 +189,7 @@ class MPCCSolver:
         solver_options: dict | None = None,
         callback: Optional[Callable[[int, IterationInfo], None]] = None,
         inner_callback: Optional[Callable[[int, dict], bool]] = None,
+        time_limit: Optional[float] = None,
         verbose: bool = False,
         presolve: bool = False,
         diagnostics: bool = False,
@@ -234,6 +243,7 @@ class MPCCSolver:
             solver_options=self.solver_options,
             callback=callback,
             inner_callback=inner_callback,
+            time_limit=time_limit,
             **strategy_options,
         )
         # linear_solver_fn bypasses the strategy's _VALID_OPTIONS and is injected
@@ -250,6 +260,7 @@ class MPCCSolver:
         if self._verbose:
             _print_verbose_preamble(self.problem, self.strategy_name, self.backend)
         result = self._strategy.solve()
+        result.time_limit_hit = bool(getattr(self._strategy, "_time_limit_hit", False))
         # Propagate complementarity-pair scaling (if any) to the result so
         # downstream callers can recover unscaled multipliers.  Done here in
         # one place rather than in every strategy.
@@ -306,6 +317,8 @@ class MPCCSolver:
         result.sosc = sc["sosc"]
         result.sosc_min_eigenvalue = sc["min_eigenvalue"]
         result.sosc_skipped_reason = sc["skipped_reason"]
+        result.hessian_condition_estimate = sc.get("cond_W")
+        result.jac_condition = _jac_cond(result, self.problem_orig)
 
     @staticmethod
     def _attach_per_pair_status(result: MPCCResult) -> None:
@@ -359,6 +372,7 @@ def solve(
     solver_options: dict | None = None,
     callback: Optional[Callable[[int, IterationInfo], None]] = None,
     inner_callback: Optional[Callable[[int, dict], bool]] = None,
+    time_limit: Optional[float] = None,
     verbose: bool = False,
     presolve: bool = False,
     diagnostics: bool = False,
@@ -468,6 +482,7 @@ def solve(
         solver_options=solver_options,
         callback=callback,
         inner_callback=inner_callback,
+        time_limit=time_limit,
         verbose=verbose,
         presolve=presolve,
         diagnostics=diagnostics,

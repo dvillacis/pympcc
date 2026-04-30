@@ -87,6 +87,8 @@ class BaseStrategy(ABC):
         self._linear_solver_fn = linear_solver_fn
         self.callback = kwargs.pop("callback", None)
         self.inner_callback = kwargs.pop("inner_callback", None)
+        self.time_limit: float | None = kwargs.pop("time_limit", None)
+        self._time_limit_hit: bool = False
         # Strategies that accept no extra kwargs (e.g. DirectStrategy) inherit
         # this base __init__; unknown kwargs are silently ignored so that
         # callers can always pass e.g. epsilon_0/max_iter without branching.
@@ -1170,6 +1172,15 @@ class BaseStrategy(ABC):
         last_info: dict = {}
         warm_dual: dict = {}
         total_time: float = 0.0
+        # Best feasible incumbent across the outer loop (§6.3).  Tracks the
+        # accepted iterate with the smallest comp_residual seen so far; on
+        # time-limit termination we restore this rather than returning the
+        # in-flight (possibly partial) iterate.
+        best_x: np.ndarray | None = None
+        best_info: dict | None = None
+        best_comp: float = float("inf")
+        self._time_limit_hit = False
+        wall_t0 = time.perf_counter()
 
         rollback_on    = getattr(self, "safeguard_rollback", False)
         adaptive_on    = getattr(self, "safeguard_adaptive_eps", False)
@@ -1203,6 +1214,10 @@ class BaseStrategy(ABC):
 
         k = 0
         while k < self.max_iter:
+            if (self.time_limit is not None
+                    and time.perf_counter() - wall_t0 >= self.time_limit):
+                self._time_limit_hit = True
+                break
             eps_ref[0] = eps
             # Zero per-solve diagnostics (n_ipopt_iter + restoration counters).
             if hasattr(nlp, "reset_iter_counters"):
@@ -1325,6 +1340,15 @@ class BaseStrategy(ABC):
             if mult_g is not None and len(mult_g):
                 prev_mult_inf = float(np.max(np.abs(mult_g)))
 
+            # Update best incumbent only on a clean (status_ok) accepted
+            # iterate.  Tie-break by smaller comp_residual; ε itself is not
+            # a tie-break because the accepted iterate already passed the
+            # tracked_eps gate when rollback is on.
+            if status_ok and info.comp_residual < best_comp:
+                best_comp = info.comp_residual
+                best_x = x.copy()
+                best_info = dict(last_info)
+
             # ---------------- termination tests ----------------
             if (kkt_term_on
                     and info.kkt_residual is not None
@@ -1374,6 +1398,14 @@ class BaseStrategy(ABC):
             if eps < self.epsilon_min:
                 break
             k += 1
+
+        # On time-limit termination, prefer the best feasible incumbent.
+        # We never overwrite when the loop ran to completion — even if the
+        # final iterate happens to have a slightly larger comp_residual,
+        # it carries fully-converged multipliers users may rely on.
+        if self._time_limit_hit and best_x is not None and best_info is not None:
+            x = best_x
+            last_info = best_info
 
         return x, last_info, total_time, history
 

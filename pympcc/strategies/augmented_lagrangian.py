@@ -167,7 +167,8 @@ class AugmentedLagrangianStrategy(BaseStrategy):
                          backend=kwargs.pop("backend", "ipopt"),
                          solver_options=kwargs.pop("solver_options", None),
                          callback=kwargs.pop("callback", None),
-                         inner_callback=kwargs.pop("inner_callback", None))
+                         inner_callback=kwargs.pop("inner_callback", None),
+                         time_limit=kwargs.pop("time_limit", None))
         opts = {**_DEFAULTS, **kwargs}
         self._validate_augmented_lagrangian_options(
             rho_0=opts["rho_0"],
@@ -319,6 +320,7 @@ class AugmentedLagrangianStrategy(BaseStrategy):
                               obj_fn=obj_al, grad_fn=grad_al,
                               hess_fn=hess_fn, hess_sparsity=hess_sparsity)
 
+        import time as _time
         history: list[IterationInfo] = []
         x = p.x0.copy()
         last_info: dict = {}
@@ -326,6 +328,13 @@ class AugmentedLagrangianStrategy(BaseStrategy):
         prev_comp_residual = np.inf
         stagnation_count = 0
         total_time: float = 0.0
+        # Best feasible incumbent (§6.3) — same convention as
+        # _run_epsilon_continuation.
+        best_x: np.ndarray | None = None
+        best_info: dict | None = None
+        best_comp: float = float("inf")
+        self._time_limit_hit = False
+        wall_t0 = _time.perf_counter()
 
         # Seed the adaptive inner tolerance from the complementarity residual
         # at x0.  If x0 is already complementary, fall back to 1.0 so the
@@ -334,6 +343,10 @@ class AugmentedLagrangianStrategy(BaseStrategy):
         _init_comp = max(float(np.max(np.abs(_G0 * _H0))), 1.0)
 
         for k in range(self.max_iter):
+            if (self.time_limit is not None
+                    and _time.perf_counter() - wall_t0 >= self.time_limit):
+                self._time_limit_hit = True
+                break
             nlp.n_ipopt_iter = 0
             if k == 1 and self.dual_warmstart:
                 nlp.add_option("warm_start_init_point", "yes")
@@ -391,6 +404,12 @@ class AugmentedLagrangianStrategy(BaseStrategy):
             if self.callback is not None:
                 self.callback(len(history) - 1, history[-1])
 
+            if (last_info["status"] in (0, 1, 3)
+                    and comp_residual < best_comp):
+                best_comp = comp_residual
+                best_x = x.copy()
+                best_info = dict(last_info)
+
             # Multiplier update: μ ← max(0, μ + ρ * G*H)
             mu_ref[0] = _mu_eff
 
@@ -412,6 +431,10 @@ class AugmentedLagrangianStrategy(BaseStrategy):
             prev_comp_residual = comp_residual
             if comp_residual < self.comp_tol:
                 break
+
+        if self._time_limit_hit and best_x is not None and best_info is not None:
+            x = best_x
+            last_info = best_info
 
         G, H = self._eval_comp_values(x, cache)
 

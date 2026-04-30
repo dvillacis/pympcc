@@ -632,7 +632,7 @@ test on macOS where fork is restricted.
 
 Module: extend `pympcc/multistart.py`.  Tests: `tests/test_multistart.py`.
 
-### 6.2. Condition-number diagnostics at x* — (S)
+### 6.2. Condition-number diagnostics at x* — (S) · ✅ shipped
 
 After a solve, report:
 
@@ -647,7 +647,7 @@ downstream feature; purely diagnostic.
 
 Module: extension to `pympcc/_diagnostics.py`.
 
-### 6.3. Time limit with feasible incumbent — (S)
+### 6.3. Time limit with feasible incumbent — (S) · ✅ shipped
 
 IPOPT's `max_cpu_secs` already stops the inner solve, but pympcc returns
 whatever IPOPT had at that point without marking it as an "incumbent".

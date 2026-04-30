@@ -152,6 +152,18 @@ class MPCCResult:
     sosc: Optional[bool] = None
     sosc_min_eigenvalue: Optional[float] = None
     sosc_skipped_reason: Optional[str] = None
+    # Condition-number diagnostics (§6.2).  Populated when ``diagnostics=True``.
+    # ``jac_condition`` — κ₂ of the active-constraint Jacobian.  Large values
+    #   coincide with near-LICQ failure.
+    # ``hessian_condition_estimate`` — κ₂ of the reduced Lagrangian Hessian
+    #   when SOSC is computable and PD.  ``None`` when SOSC was skipped or
+    #   the reduced Hessian is indefinite.
+    jac_condition: Optional[float] = None
+    hessian_condition_estimate: Optional[float] = None
+    # Time-limit incumbent flag (§6.3).  ``True`` when a ``time_limit`` was
+    # set and the outer loop terminated early because of it; the returned
+    # iterate is the best feasible incumbent seen up to that point.
+    time_limit_hit: bool = False
 
     def unscale_comp_multipliers(
         self,

@@ -24,7 +24,7 @@ from ._stationarity import _dense_jac
 from .problem import MPCCProblem
 from .result import MPCCResult
 
-__all__ = ["classify_cq", "active_sets"]
+__all__ = ["classify_cq", "active_sets", "jac_condition_number"]
 
 
 def active_sets(
@@ -325,3 +325,32 @@ def classify_cq(
         "rank_deficit": int(rank_deficit),
         "n_active_rows": int(n_rows),
     }
+
+
+def jac_condition_number(
+    result: MPCCResult,
+    problem: MPCCProblem,
+    *,
+    tol: float = 1e-6,
+) -> Optional[float]:
+    """Condition number κ₂(M_active) of the active-constraint Jacobian.
+
+    Builds the same active-gradient stack used by :func:`classify_cq`
+    (rows: equality, comp G/H on the active sides, active inequality,
+    active variable bounds) and returns ``np.linalg.cond`` of that
+    matrix.  Large values indicate near-rank-deficiency, which usually
+    coincides with MPCC-LICQ failure or numerically ill-conditioned
+    multipliers.
+
+    Returns ``None`` when ``result.success`` is False or when the active
+    matrix is empty.  An infinite condition number (rank deficient) is
+    returned as ``float('inf')``.
+    """
+    if not result.success:
+        return None
+    sets = active_sets(result, problem, tol=tol)
+    x = np.asarray(result.x, dtype=float)
+    M, _ = _stack_active_gradient_matrix(problem, x, sets)
+    if M.size == 0:
+        return None
+    return float(np.linalg.cond(M))

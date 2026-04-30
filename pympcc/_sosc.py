@@ -175,7 +175,7 @@ def sosc_check(
         ``skipped_reason`` : str or None
             Explanation when ``sosc is None``.
     """
-    _empty = {"sosc": None, "min_eigenvalue": None,
+    _empty = {"sosc": None, "min_eigenvalue": None, "cond_W": None,
                "null_space_dim": None, "n_active": None, "skipped_reason": None}
 
     if not result.success:
@@ -230,19 +230,27 @@ def sosc_check(
     # ------------------------------------------------------------------ #
     # Reduced Hessian and SOSC test.                                       #
     # ------------------------------------------------------------------ #
+    cond_W: Optional[float]
     if null_dim == 0:
         # Critical cone = {0}: SOSC trivially satisfied.
         min_eig = float("inf")
+        cond_W = None
         sosc = True
     else:
         W = Z.T @ H_mat @ Z
         eigvals = np.linalg.eigvalsh(W)
         min_eig = float(eigvals.min())
+        max_abs = float(np.abs(eigvals).max())
+        # Condition of the reduced Hessian.  Defined only when min_eig > 0
+        # (W is PD); for non-PD W we leave it None — the user already sees
+        # SOSC=False, and a "negative" condition number would be misleading.
+        cond_W = (max_abs / min_eig) if min_eig > 0.0 else float("inf")
         sosc = bool(min_eig > tol)
 
     return {
         "sosc": sosc,
         "min_eigenvalue": min_eig,
+        "cond_W": cond_W,
         "null_space_dim": null_dim,
         "n_active": n_active,
         "skipped_reason": None,
