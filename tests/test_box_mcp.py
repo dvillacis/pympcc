@@ -6,7 +6,8 @@
 * lower-only finite → comp pair ``(x - ell) ≥ 0 ⊥ F(x) ≥ 0``
 * upper-only finite → comp pair ``(u - x) ≥ 0 ⊥ -F(x) ≥ 0``
 * both infinite (free) → equality ``F(x) = 0`` appended to eq block
-* both finite (doubly-bounded) → ``NotImplementedError`` (deferred)
+* both finite (doubly-bounded) → universal Billups slack lift (2 slacks per
+  entry, 1 equality, 2 comp pairs)
 """
 from __future__ import annotations
 
@@ -296,6 +297,146 @@ class TestMixed:
 
 
 # ---------------------------------------------------------------------------
+# Doubly-bounded → universal Billups slack lift
+# ---------------------------------------------------------------------------
+
+class TestDoublyBounded:
+    """Doubly-bounded ``ℓ ≤ x[j] ≤ u  ⊥  F(x)`` is lifted with two
+    slacks ``s₋, s₊ ≥ 0``: equality ``F − s₋ + s₊ = 0`` plus comp pairs
+    ``(x − ℓ) ⊥ s₋`` and ``(u − x) ⊥ s₊``.  PATH semantics: if F(x*)>0
+    push to lower bound; if F(x*)<0 push to upper bound; else interior.
+    """
+
+    def test_lift_extends_n_and_records_metadata(self):
+        """Lift adds 2 slacks per entry and tags n_orig_doubly_bounded."""
+        f, g = _quad_obj([0.5])
+        p = MPCCProblem(
+            n=1, n_comp=0,
+            x0=np.array([0.5]),
+            xl=np.array([0.0]),
+            xu=np.array([1.0]),
+            objective=f, gradient=g,
+            comp_box_pairs=[
+                (0, lambda x: np.array([x[0] - 0.5]),
+                 lambda x: np.array([1.0])),
+            ],
+        )
+        assert p.n == 3                       # 1 orig + 2 slacks
+        assert p.n_orig_doubly_bounded == 1
+        assert p.n_doubly_bounded_pairs == 1
+        assert p.n_comp == 2                  # two comp pairs per entry
+        assert p.n_eq == 1                    # one F-balance equality
+        np.testing.assert_array_equal(p.xl, [0.0, 0.0, 0.0])
+        np.testing.assert_array_equal(p.xu, [1.0, np.inf, np.inf])
+        # x0 padded with slack zeros
+        np.testing.assert_array_equal(p.x0, [0.5, 0.0, 0.0])
+
+    def test_active_at_lower(self):
+        """F(x*) > 0 throughout box → solution at x = ℓ."""
+        # min (x - (-2))^2 s.t. 0 ≤ x ≤ 1 ⊥ F(x) = x + 2.
+        # F is strictly positive on [0, 1]; PATH picks x = ℓ = 0.
+        f, g = _quad_obj([-2.0])
+        p = MPCCProblem(
+            n=1, n_comp=0,
+            x0=np.array([0.5]),
+            xl=np.array([0.0]),
+            xu=np.array([1.0]),
+            objective=f, gradient=g,
+            comp_box_pairs=[
+                (0, lambda x: np.array([x[0] + 2.0]),
+                 lambda x: np.array([1.0])),
+            ],
+        )
+        r = pympcc.solve(p, strategy="scholtes")
+        assert r.status == 0
+        assert r.x[0] == pytest.approx(0.0, abs=1e-5)
+
+    def test_active_at_upper(self):
+        """F(x*) < 0 throughout box → solution at x = u."""
+        # F(x) = x - 5 is strictly negative on [0, 1]; PATH picks x = u = 1.
+        f, g = _quad_obj([5.0])
+        p = MPCCProblem(
+            n=1, n_comp=0,
+            x0=np.array([0.5]),
+            xl=np.array([0.0]),
+            xu=np.array([1.0]),
+            objective=f, gradient=g,
+            comp_box_pairs=[
+                (0, lambda x: np.array([x[0] - 5.0]),
+                 lambda x: np.array([1.0])),
+            ],
+        )
+        r = pympcc.solve(p, strategy="scholtes")
+        assert r.status == 0
+        assert r.x[0] == pytest.approx(1.0, abs=1e-5)
+
+    def test_interior(self):
+        """F(x*) = 0 in box interior → solution at the F-root."""
+        # F(x) = x - 0.3, root in (0, 1); PATH picks x = 0.3.
+        f, g = _quad_obj([0.3])
+        p = MPCCProblem(
+            n=1, n_comp=0,
+            x0=np.array([0.7]),
+            xl=np.array([0.0]),
+            xu=np.array([1.0]),
+            objective=f, gradient=g,
+            comp_box_pairs=[
+                (0, lambda x: np.array([x[0] - 0.3]),
+                 lambda x: np.array([1.0])),
+            ],
+        )
+        r = pympcc.solve(p, strategy="scholtes")
+        assert r.status == 0
+        assert r.x[0] == pytest.approx(0.3, abs=1e-5)
+        # both slacks should be ~0 in the interior
+        assert r.x[1] == pytest.approx(0.0, abs=1e-5)
+        assert r.x[2] == pytest.approx(0.0, abs=1e-5)
+
+    def test_two_tuple_uses_fd_for_F_jac(self):
+        """Doubly-bounded entry can omit F_jac (fd fallback)."""
+        f, g = _quad_obj([0.3])
+        p = MPCCProblem(
+            n=1, n_comp=0,
+            x0=np.array([0.7]),
+            xl=np.array([0.0]),
+            xu=np.array([1.0]),
+            objective=f, gradient=g,
+            comp_box_pairs=[(0, lambda x: np.array([x[0] - 0.3]))],
+        )
+        r = pympcc.solve(p, strategy="scholtes")
+        assert r.status == 0
+        assert r.x[0] == pytest.approx(0.3, abs=1e-5)
+
+    def test_mixed_with_lower_only_entry(self):
+        """Doubly-bounded entry coexists with a lower-only entry."""
+        # x[0]: 0 ≤ x[0] ≤ 1 ⊥ F0 = x[0] - 0.3 → interior, x[0] = 0.3
+        # x[1]: x[1] ≥ 0       ⊥ F1 = x[1] - 0.7 → interior, x[1] = 0.7
+        f, g = _quad_obj([0.3, 0.7])
+        p = MPCCProblem(
+            n=2, n_comp=0,
+            x0=np.array([0.5, 0.5]),
+            xl=np.array([0.0, 0.0]),
+            xu=np.array([1.0, np.inf]),
+            objective=f, gradient=g,
+            comp_box_pairs=[
+                (0, lambda x: np.array([x[0] - 0.3]),
+                 lambda x: np.array([1.0, 0.0])),
+                (1, lambda x: np.array([x[1] - 0.7]),
+                 lambda x: np.array([0.0, 1.0])),
+            ],
+        )
+        r = pympcc.solve(p, strategy="scholtes")
+        assert r.status == 0
+        # original vars at the front
+        assert r.x[0] == pytest.approx(0.3, abs=1e-5)
+        assert r.x[1] == pytest.approx(0.7, abs=1e-5)
+        # 2 slacks appended for the single doubly-bounded entry
+        assert p.n == 4
+        assert p.n_orig_doubly_bounded == 2
+        assert p.n_doubly_bounded_pairs == 1
+
+
+# ---------------------------------------------------------------------------
 # fd fallback for F_jac
 # ---------------------------------------------------------------------------
 
@@ -325,19 +466,6 @@ class TestFiniteDifferenceJacobian:
 # ---------------------------------------------------------------------------
 
 class TestErrors:
-    def test_doubly_bounded_raises(self):
-        """Both bounds finite → NotImplementedError pointing to §4.9 Phase 2."""
-        f, g = _quad_obj([0.0])
-        with pytest.raises(NotImplementedError, match="doubly-bounded"):
-            MPCCProblem(
-                n=1, n_comp=0,
-                x0=np.array([0.5]),
-                xl=np.array([0.0]),
-                xu=np.array([1.0]),
-                objective=f, gradient=g,
-                comp_box_pairs=[(0, lambda x: np.array([x[0] - 0.5]))],
-            )
-
     def test_pure_free_no_base_raises(self):
         """All-free + no base comp_G is a pure CNS → ValueError."""
         f, g = _quad_obj([0.0])

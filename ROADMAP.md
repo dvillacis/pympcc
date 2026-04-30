@@ -37,8 +37,8 @@ PATH/KNITRO parity gaps; 14–17 are smaller polish items.
 | # | Item | Section | Scope | Status |
 |---|------|---------|-------|--------|
 | 9  | JAX-differentiable solve (`custom_vjp` through TNLP)         | §5.6 | M | ✅ shipped |
-| 10 | Pyomo / `mpec.complementarity` frontend                      | §4.1 | M | planned |
-| 11 | Box-MCP / doubly-bounded canonical form `ℓ ≤ x ≤ u ⊥ F(x)`   | §4.9 | M | Phase 1 ✅ / Phase 2 planned |
+| 10 | Pyomo / `mpec.complementarity` frontend                      | §4.1 | M | ✅ shipped |
+| 11 | Box-MCP / doubly-bounded canonical form `ℓ ≤ x ≤ u ⊥ F(x)`   | §4.9 | M | ✅ shipped |
 | 12 | Stateful warm hot-start solver object (MPC rolling-horizon)  | §6.5 | M | planned |
 | 13 | PATH-style multi-merit & degeneracy termination diagnostics  | §2.7 | S | ✅ |
 | 14 | Parallel multistart (`n_jobs`)                               | §6.1 | S | planned |
@@ -435,8 +435,12 @@ three NCPs above).  Closing the most-cited remaining gaps:
 * **Veelken-Ulbrich smoothings** — `fVUsin`, `fVUpow` smooth perturbations
   of the min-NCP that retain MFCQ near degeneracy.
 * **Median NCP for doubly-bounded variables** — `median(x − ℓ, x − u, F(x)) = 0`,
-  required by box-MCP (§4.9).  This is the *one* NCP that pympcc cannot
-  ship until §4.9 lands, since it depends on the box-MCP canonical form.
+  the alternative reformulation for box-MCP (§4.9).  Not strictly
+  required: box-MCP §4.9 already ships using a universal Billups slack
+  lift that any existing strategy can solve.  A median-NCP strategy
+  would skip the slack variables and reformulate complementarity in the
+  inequality block instead — useful for benchmarking against NLPEC's
+  `med` row, otherwise optional.
 
 Each lands as a thin strategy class (~80 LOC) reusing the smoothing
 ε-continuation harness.
@@ -511,15 +515,26 @@ chosen nonlinear strategy otherwise.
 
 ## 4. Modeling & user experience
 
-### 4.1. Pyomo / mpec.complementarity bridge — (M) · *planned*
+### 4.1. Pyomo / mpec.complementarity bridge ✅ *(shipped)*
 
-Today users hand-roll callables and COO sparsity.  A Pyomo backend
-would let users write
-`m.comp = Complementarity(expr=complements(m.x >= 0, m.y >= 0))` and
-have pympcc compile it down to `MPCCProblem`.  Eliminates most of the
-COO bookkeeping in `bilevel_mpcc_imaging/problem.py`.
+`pympcc.frontend.pyomo.from_pyomo(model)` accepts a Pyomo
+`ConcreteModel` containing one or more
+`Complementarity(expr=complements(...))` blocks and returns a
+`PyomoMPCC` carrying the numeric `MPCCProblem` plus name-to-index
+maps for variables and constraints.  Implementation: clone the model,
+apply `TransformationFactory("mpec.nl")` (which encodes each comp
+block via AMPL bound-type-5 ``cvar`` mapping), pipe through Pyomo's
+NL writer, then parse with the existing `pympcc.frontend.ampl.from_nl`.
+
+Companion helper `apply_solution(model, x, var_index)` writes a
+solution back into the original model by qualified name.  Pure-NLP
+models (no `Complementarity` blocks) raise `ValueError` with a
+pointer to IPOPT/cyipopt; pympcc's scope is MPCC only.
+
+Pyomo is an opt-in dependency: install with `pip install pympcc[pyomo]`.
 
 Module: `pympcc/frontend/pyomo.py`.
+Tests: `tests/test_pyomo_frontend.py` (8 cases).
 
 ### 4.2. Default JAX-AD path ✅ *(shipped)*
 
@@ -654,7 +669,7 @@ Module: `pympcc/_nlp.py` (`_invoke_inner_callback`,
 `__init__`; surface in `pympcc/solver.py`.
 Tests: `tests/test_inner_callback.py` (10 cases).
 
-### 4.9. Box-MCP / doubly-bounded canonical form — (M) · *priority 11* · *Phase 1 ✅ shipped, Phase 2 planned*
+### 4.9. Box-MCP / doubly-bounded canonical form — (M) · *priority 11* · ✅ *(shipped)*
 
 PATH's canonical form is
 
@@ -677,14 +692,26 @@ finiteness:
   `(u − x) ≥ 0 ⊥ −F(x)` (sign-flipped).
 * **Free** (both infinite) ✅ shipped — appends `F(x) = 0` to the eq
   block (constrained nonlinear system); `n_eq` auto-bumps.
-* **Doubly-bounded** (both finite) — Phase 2 planned: median NCP
-  `median(x − ℓ, x − u, F(x)) = 0` (see §3.5 ext).  Currently raises
-  `NotImplementedError` with a clear message.
+* **Doubly-bounded** (both finite) ✅ shipped — universal Billups /
+  Mangasarian slack lift.  For each entry, two new variables
+  `s₋, s₊ ≥ 0` are appended to `x`, an equality
+  `F(x) − s₋ + s₊ = 0` is appended to the eq block, and two
+  complementarity pairs `(x[j] − ℓ) ⊥ s₋`, `(u − x[j]) ⊥ s₊` are
+  appended to `comp_G` / `comp_H`.  Reproduces PATH's three-way sign
+  convention: when `F(x*) > 0` the second pair forces `s₊ = 0` and the
+  active first pair drives `x = ℓ`; symmetric at the upper bound; in
+  the box interior both slacks vanish and `F = 0`.  Original variables
+  remain at indices `0..n_orig` of the lifted `result.x`; recover
+  `n_orig` via `problem.n_orig_doubly_bounded`.  The lift is universal
+  — every existing strategy (Direct, Scholtes, Smoothing,
+  Lin–Fukushima, AugLag, Slack) sees a standard `MPCCProblem` and
+  needs no per-strategy change.
 
-Phase-1 limitations (revisited in Phase 2): `comp_box_pairs` is
-mutually exclusive with `comp_var_pairs` / `comp_var_pairs_bulk`;
-sparse base `comp_G_jacobian_sparsity` and sparse `eq_jacobian_sparsity`
-are rejected (the helper builds dense rows).
+Limitations: `comp_box_pairs` is mutually exclusive with
+`comp_var_pairs` / `comp_var_pairs_bulk`; sparse base
+`comp_G_jacobian_sparsity` / `eq_jacobian_sparsity` are rejected (the
+helper builds dense rows; doubly-bounded entries also reject sparse
+base Jacobians).
 
 Composes with `derivatives="jax"` / `"fd"` and with all existing
 strategies — each strategy sees the standard `comp_G` / `comp_H` /
@@ -692,8 +719,9 @@ eq rows after expansion; box-handling lives in
 `MPCCProblem._normalize_box_pairs`.
 
 Module: `pympcc/problem.py` — `comp_box_pairs` field +
-`_normalize_box_pairs`, `_extend_comp_with_box`, `_extend_eq_with_free`.
-Tests: `tests/test_box_mcp.py` (21 cases).
+`_normalize_box_pairs`, `_extend_comp_with_box`, `_extend_eq_with_free`,
+`_extend_with_doubly_bounded`.
+Tests: `tests/test_box_mcp.py` (26 cases).
 
 ---
 

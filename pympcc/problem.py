@@ -797,17 +797,18 @@ class MPCCProblem:
         free_entries: list = []
         lower_entries: list = []
         upper_entries: list = []
+        doubly_bounded_entries: list = []
         for vi, F_fn, F_jac, ell, u in parsed:
             ell_finite = bool(np.isfinite(ell))
             u_finite = bool(np.isfinite(u))
             if ell_finite and u_finite:
-                raise NotImplementedError(
-                    f"comp_box_pairs: var_idx={vi} has doubly-bounded box "
-                    f"[{ell}, {u}]; this requires the median NCP "
-                    "(ROADMAP §3.5 ext / §4.9 Phase 2) which is not yet shipped. "
-                    "Workaround: drop one of the bounds, or lift manually with "
-                    "auxiliary slacks."
-                )
+                if ell >= u:
+                    raise ValueError(
+                        f"comp_box_pairs: var_idx={vi} has degenerate box "
+                        f"[{ell}, {u}] (lower >= upper)."
+                    )
+                doubly_bounded_entries.append((vi, F_fn, F_jac, ell, u))
+                continue
             if ell_finite:
                 lower_entries.append((vi, F_fn, F_jac, ell))
             elif u_finite:
@@ -830,6 +831,14 @@ class MPCCProblem:
         # ---- Free → extend eq block ---------------------------------------
         if free_entries:
             self._extend_eq_with_free(free_entries, _resolve_F_jac)
+
+        # ---- Doubly-bounded → lift via Billups slack split ----------------
+        # MUST run last: the lift extends ``n`` and wraps every user
+        # callable (objective, gradient, comp_G/H, ineq, eq) onto the
+        # original n-block, so any rebinding done by the helpers above
+        # has to already be in place.
+        if doubly_bounded_entries:
+            self._extend_with_doubly_bounded(doubly_bounded_entries, _resolve_F_jac)
 
         if self.comp_G is None:
             raise ValueError(
@@ -1027,6 +1036,222 @@ class MPCCProblem:
             self.eq_jacobian = _eq_jac_free
 
         self.n_eq = n_eq_base + n_free
+
+    def _extend_with_doubly_bounded(self, db_entries: list, resolve_F_jac) -> None:
+        """Lift doubly-bounded ``ℓ ≤ x[j] ≤ u  ⊥  F(x)`` entries via the
+        Billups / Mangasarian slack split.
+
+        For each entry ``(j, F_fn, F_jac_fn)`` with finite ``xl[j] = ℓ``
+        and ``xu[j] = u``, the lift introduces two new variables
+        ``s₋, s₊ ≥ 0`` and rewrites the box-MCP as
+
+        * one equality row  ``F(x) − s₋ + s₊ = 0``;
+        * two complementarity pairs:
+              ``(x[j] − ℓ) ≥ 0  ⊥  s₋ ≥ 0``
+              ``(u − x[j]) ≥ 0  ⊥  s₊ ≥ 0``.
+
+        Why this works: at ``x[j] = ℓ`` the second pair forces ``s₊ = 0``
+        and the first leaves ``s₋`` free, giving ``F = s₋ ≥ 0``.
+        At ``x[j] = u``, by symmetry, ``F = −s₊ ≤ 0``.
+        Strictly inside the box both pairs force ``s₋ = s₊ = 0`` so
+        ``F = 0``.  These are exactly the PATH semantics for the
+        doubly-bounded MCP.
+
+        The lift is universal: every existing strategy sees a standard
+        :class:`MPCCProblem` and does not need to know about it.
+        Originally-named decision variables stay at indices ``0..n_orig``
+        in the lifted ``x`` vector, so users can reach them via
+        ``result.x[:problem.n_orig_doubly_bounded]`` (the slack tail
+        lives at ``result.x[n_orig:]``).
+        """
+        if self.is_sparse:
+            raise NotImplementedError(
+                "comp_box_pairs doubly-bounded entries do not support sparse "
+                "base Jacobians in this release. Pass dense Jacobians."
+            )
+
+        n_orig = self.n
+        k = len(db_entries)
+        n_new = n_orig + 2 * k
+
+        j_idxs = np.array([entry[0] for entry in db_entries], dtype=np.intp)
+        ells = np.array([entry[3] for entry in db_entries], dtype=float)
+        us = np.array([entry[4] for entry in db_entries], dtype=float)
+        F_fns = [entry[1] for entry in db_entries]
+        F_jacs = [resolve_F_jac(entry[1], entry[2]) for entry in db_entries]
+
+        # Slack columns interleave per entry: [s₋_0, s₊_0, s₋_1, s₊_1, ...].
+        s_minus_cols = np.arange(n_orig, n_new, 2, dtype=np.intp)
+        s_plus_cols = np.arange(n_orig + 1, n_new, 2, dtype=np.intp)
+
+        # ---- Variable bounds + x0 extension --------------------------------
+        assert self.xl is not None and self.xu is not None
+        self.xl = np.concatenate([self.xl, np.zeros(2 * k)])
+        self.xu = np.concatenate([self.xu, np.full(2 * k, np.inf)])
+        self.x0 = np.concatenate([self.x0, np.zeros(2 * k)])
+        self.n = n_new
+        self.n_orig_doubly_bounded = n_orig
+        self.n_doubly_bounded_pairs = k
+
+        # ---- Wrap objective + gradient -------------------------------------
+        base_obj = self.objective
+        base_grad = self.gradient
+        if not callable(base_grad):
+            raise ValueError(
+                "comp_box_pairs doubly-bounded entries require a resolved "
+                "gradient callable. Pass derivatives='fd' or 'jax', or "
+                "supply gradient explicitly."
+            )
+
+        def _obj_lifted(x, _bo=base_obj, _no=n_orig):
+            return _bo(np.asarray(x)[:_no])
+
+        def _grad_lifted(x, _bg=base_grad, _no=n_orig, _nn=n_new):
+            out = np.zeros(_nn)
+            out[:_no] = np.asarray(_bg(np.asarray(x)[:_no]), dtype=float).ravel()
+            return out
+
+        self.objective = _obj_lifted
+        self.gradient = _grad_lifted
+
+        # ---- Wrap comp_G / comp_H + Jacobians; append 2k new pairs --------
+        base_G = self.comp_G  # may be None when only doubly-bounded entries are present
+        base_H = self.comp_H
+        base_G_jac = self.comp_G_jacobian if callable(self.comp_G_jacobian) else None
+        base_H_jac = self.comp_H_jacobian if callable(self.comp_H_jacobian) else None
+        n_comp_base = self.n_comp
+
+        if base_G is not None and (base_G_jac is None or base_H_jac is None):
+            raise ValueError(
+                "comp_box_pairs doubly-bounded entries require comp_G_jacobian "
+                "and comp_H_jacobian to be resolved callables when base "
+                "comp_G / comp_H are set. Pass derivatives='fd' or 'jax', or "
+                "supply Jacobians explicitly."
+            )
+        if base_G is None and n_comp_base != 0:
+            raise ValueError(
+                f"comp_box_pairs: comp_G is None but n_comp={n_comp_base}; "
+                "with doubly-bounded entries only (no base comp_G/H), set "
+                "n_comp=0 (box-pair contributions are auto-counted)."
+            )
+
+        def _comp_G_lifted(x, _bG=base_G, _ji=j_idxs, _ell=ells, _us=us,
+                           _no=n_orig, _k=k):
+            x = np.asarray(x)
+            x_orig = x[:_no]
+            base_vals = (np.asarray(_bG(x_orig), dtype=float).ravel()
+                         if _bG is not None else np.empty(0))
+            new_vals = np.empty(2 * _k)
+            new_vals[0::2] = x_orig[_ji] - _ell
+            new_vals[1::2] = _us - x_orig[_ji]
+            return np.concatenate([base_vals, new_vals])
+
+        def _comp_H_lifted(x, _bH=base_H, _smi=s_minus_cols, _spi=s_plus_cols,
+                           _no=n_orig, _k=k):
+            x = np.asarray(x)
+            x_orig = x[:_no]
+            base_vals = (np.asarray(_bH(x_orig), dtype=float).ravel()
+                         if _bH is not None else np.empty(0))
+            new_vals = np.empty(2 * _k)
+            new_vals[0::2] = x[_smi]   # s₋
+            new_vals[1::2] = x[_spi]   # s₊
+            return np.concatenate([base_vals, new_vals])
+
+        def _comp_G_jac_lifted(x, _bJ=base_G_jac, _ji=j_idxs, _no=n_orig,
+                               _nn=n_new, _ncb=n_comp_base, _k=k):
+            J = np.zeros((_ncb + 2 * _k, _nn))
+            if _bJ is not None and _ncb > 0:
+                J[:_ncb, :_no] = np.asarray(_bJ(np.asarray(x)[:_no]), dtype=float)
+            for i in range(_k):
+                J[_ncb + 2 * i, _ji[i]] = 1.0       # ∂(x[j]-ℓ)/∂x[j]
+                J[_ncb + 2 * i + 1, _ji[i]] = -1.0  # ∂(u-x[j])/∂x[j]
+            return J
+
+        def _comp_H_jac_lifted(x, _bJ=base_H_jac, _smi=s_minus_cols,
+                               _spi=s_plus_cols, _no=n_orig, _nn=n_new,
+                               _ncb=n_comp_base, _k=k):
+            J = np.zeros((_ncb + 2 * _k, _nn))
+            if _bJ is not None and _ncb > 0:
+                J[:_ncb, :_no] = np.asarray(_bJ(np.asarray(x)[:_no]), dtype=float)
+            for i in range(_k):
+                J[_ncb + 2 * i, _smi[i]] = 1.0       # ∂s₋/∂s₋
+                J[_ncb + 2 * i + 1, _spi[i]] = 1.0   # ∂s₊/∂s₊
+            return J
+
+        self.comp_G = _comp_G_lifted
+        self.comp_H = _comp_H_lifted
+        self.comp_G_jacobian = _comp_G_jac_lifted
+        self.comp_H_jacobian = _comp_H_jac_lifted
+        self.n_comp = n_comp_base + 2 * k
+
+        # ---- Wrap eq_constraints + Jacobian; append k new rows ------------
+        base_eq = self.eq_constraints
+        base_eq_jac = self.eq_jacobian if callable(self.eq_jacobian) else None
+        n_eq_base = self.n_eq
+
+        if base_eq is not None and base_eq_jac is None:
+            raise ValueError(
+                "comp_box_pairs doubly-bounded entries require eq_jacobian "
+                "to be a resolved callable when base eq_constraints is set. "
+                "Pass derivatives='fd' or 'jax', or supply eq_jacobian "
+                "explicitly."
+            )
+
+        def _eq_lifted(x, _be=base_eq, _ffns=F_fns, _smi=s_minus_cols,
+                       _spi=s_plus_cols, _no=n_orig, _k=k):
+            x = np.asarray(x)
+            x_orig = x[:_no]
+            base_vals = (np.asarray(_be(x_orig), dtype=float).ravel()
+                         if _be is not None else np.empty(0))
+            new_vals = np.empty(_k)
+            for i, F in enumerate(_ffns):
+                new_vals[i] = (
+                    float(np.asarray(F(x_orig)).ravel()[0])
+                    - x[_smi[i]] + x[_spi[i]]
+                )
+            return np.concatenate([base_vals, new_vals])
+
+        def _eq_jac_lifted(x, _bJ=base_eq_jac, _Fjacs=F_jacs,
+                           _smi=s_minus_cols, _spi=s_plus_cols, _no=n_orig,
+                           _nn=n_new, _neb=n_eq_base, _k=k):
+            x_orig = np.asarray(x)[:_no]
+            J = np.zeros((_neb + _k, _nn))
+            if _bJ is not None and _neb > 0:
+                J[:_neb, :_no] = np.asarray(_bJ(x_orig), dtype=float)
+            for i, jf in enumerate(_Fjacs):
+                J[_neb + i, :_no] = np.asarray(jf(x_orig), dtype=float).ravel()
+                J[_neb + i, _smi[i]] = -1.0
+                J[_neb + i, _spi[i]] = 1.0
+            return J
+
+        self.eq_constraints = _eq_lifted
+        self.eq_jacobian = _eq_jac_lifted
+        self.n_eq = n_eq_base + k
+
+        # ---- Wrap ineq_constraints + Jacobian (zero-pad slack columns) ----
+        if self.n_ineq > 0 and self.ineq_constraints is not None:
+            base_ineq = self.ineq_constraints
+            base_ineq_jac = (self.ineq_jacobian
+                             if callable(self.ineq_jacobian) else None)
+            if base_ineq_jac is None:
+                raise ValueError(
+                    "comp_box_pairs doubly-bounded entries require "
+                    "ineq_jacobian to be a resolved callable when "
+                    "ineq_constraints is set."
+                )
+            n_ineq = self.n_ineq
+
+            def _ineq_lifted(x, _bi=base_ineq, _no=n_orig):
+                return _bi(np.asarray(x)[:_no])
+
+            def _ineq_jac_lifted(x, _bJ=base_ineq_jac, _no=n_orig,
+                                 _nn=n_new, _ng=n_ineq):
+                J = np.zeros((_ng, _nn))
+                J[:, :_no] = np.asarray(_bJ(np.asarray(x)[:_no]), dtype=float)
+                return J
+
+            self.ineq_constraints = _ineq_lifted
+            self.ineq_jacobian = _ineq_jac_lifted
 
     def _check_derivatives_resolved(self) -> None:
         """Raise a clear error when a required derivative is still missing.
