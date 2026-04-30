@@ -6,6 +6,10 @@ build:
     python: "3.11"
   apt_packages:
     - coinor-libipopt-dev
+    - libblas-dev
+    - liblapack-dev
+    - gfortran
+    - pkg-config
   jobs:
     post_install:
       - pip install -e ".[docs,jax,ipopt]"
