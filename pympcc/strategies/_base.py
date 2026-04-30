@@ -89,6 +89,14 @@ class BaseStrategy(ABC):
         self.inner_callback = kwargs.pop("inner_callback", None)
         self.time_limit: float | None = kwargs.pop("time_limit", None)
         self._time_limit_hit: bool = False
+        # Hot-start machinery (§6.5).  ``_initial_warm_dual`` is a one-shot
+        # seed consumed by the strategy's first ``nlp.solve`` call when
+        # :meth:`MPCCSolver.resolve` injects state from a previous solve.
+        # ``_last_solve_state`` is refreshed at the end of every
+        # ``_timed_solve`` so :meth:`MPCCSolver.resolve` can fish out the
+        # final-iterate multipliers regardless of which strategy ran.
+        self._initial_warm_dual: dict | None = None
+        self._last_solve_state: dict | None = None
         # Strategies that accept no extra kwargs (e.g. DirectStrategy) inherit
         # this base __init__; unknown kwargs are silently ignored so that
         # callers can always pass e.g. epsilon_0/max_iter without branching.
@@ -804,13 +812,19 @@ class BaseStrategy(ABC):
         """Call ``nlp.solve()`` with optional warm-start and return ``(x, info, elapsed)``.
 
         *elapsed* is the wall-clock seconds spent inside ``nlp.solve()``.
-        Warm-start multipliers are passed only when ``self.dual_warmstart`` is
-        ``True`` (strategies without that attribute always skip warm-start).
-        Emits a ``UserWarning`` when IPOPT returns a non-success status so that
-        outer-loop failures are never silent.
+        A non-empty *warm_dual* is forwarded as ``lagrange``/``zl``/``zu``
+        kwargs regardless of ``self.dual_warmstart``: the flag controls
+        whether outer iterations *populate* a warm dual between solves; once
+        a warm dual is in hand, it always gets forwarded.  This lets
+        :meth:`MPCCSolver.resolve` inject a warm seed into single-shot
+        strategies (e.g. ``direct``) that don't carry their own dual
+        warm-start machinery.
+
+        On exit, refreshes ``self._last_solve_state`` with the final
+        multipliers so ``MPCCSolver.resolve`` can fish them back out.
         """
         t0 = time.perf_counter()
-        if getattr(self, "dual_warmstart", False) and warm_dual:
+        if warm_dual:
             x, info = nlp.solve(x, **warm_dual)
         else:
             x, info = nlp.solve(x)
@@ -827,6 +841,15 @@ class BaseStrategy(ABC):
                 UserWarning,
                 stacklevel=3,
             )
+        self._last_solve_state = {
+            "lagrange": info.get("mult_g"),
+            "zl":       info.get("mult_x_L"),
+            "zu":       info.get("mult_x_U"),
+        }
+        # Strategies without a per-iteration ``history`` (e.g. ``direct``)
+        # rely on this side channel to surface IPOPT iter counts to
+        # :class:`MPCCSolver._populate_warmstart_fields`.
+        self._last_n_ipopt_iter = int(getattr(nlp, "n_ipopt_iter", 0) or 0)
         return x, info, elapsed
 
     # ------------------------------------------------------------------ #
@@ -1170,7 +1193,14 @@ class BaseStrategy(ABC):
         x = np.asarray(x0, dtype=float).copy()
         eps = self.epsilon_0
         last_info: dict = {}
+        # Hot-start seed (§6.5).  When :meth:`MPCCSolver.resolve` injects a
+        # warm dual from a previous solve, consume it on the very first
+        # inner solve and arm IPOPT's ``warm_start_init_point`` immediately
+        # rather than waiting until the second outer iteration.
         warm_dual: dict = {}
+        if self._initial_warm_dual:
+            warm_dual = dict(self._initial_warm_dual)
+            self._initial_warm_dual = None  # one-shot
         total_time: float = 0.0
         # Best feasible incumbent across the outer loop (§6.3).  Tracks the
         # accepted iterate with the smallest comp_residual seen so far; on
@@ -1208,6 +1238,12 @@ class BaseStrategy(ABC):
         prev_mult_inf  = None
         last_good_eps: float | None = None  # most recent ε of an accepted iterate
         warm_init_armed_at: int | None = None  # outer index where we toggled warm_start_init_point
+        # When :meth:`MPCCSolver.resolve` seeded ``warm_dual`` we want IPOPT
+        # to honour it on the very first inner solve, so arm
+        # ``warm_start_init_point`` before entering the loop.
+        if warm_dual:
+            nlp.add_option("warm_start_init_point", "yes")
+            warm_init_armed_at = 0
         plateau_streak = 0
         prev_obj_acc: float | None = None
         prev_comp_acc: float | None = None

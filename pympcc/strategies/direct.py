@@ -136,7 +136,13 @@ class DirectStrategy(BaseStrategy):
 
         nlp = self._build_nlp(cl, cu, constraints, jacobian, jac_structure,
                                hess_fn=hess_fn, hess_sparsity=hess_sparsity)
-        x, info, solve_time = self._timed_solve(nlp, p.x0, {})
+        # Consume any hot-start seed injected by :meth:`MPCCSolver.resolve`.
+        warm: dict = {}
+        if self._initial_warm_dual:
+            warm = dict(self._initial_warm_dual)
+            self._initial_warm_dual = None
+            nlp.add_option("warm_start_init_point", "yes")
+        x, info, solve_time = self._timed_solve(nlp, p.x0, warm)
 
         G, H = self._eval_comp_values(x, cache)
 

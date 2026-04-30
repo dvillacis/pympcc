@@ -39,7 +39,7 @@ PATH/KNITRO parity gaps; 14–17 are smaller polish items.
 | 9  | JAX-differentiable solve (`custom_vjp` through TNLP)         | §5.6 | M | ✅ shipped |
 | 10 | Pyomo / `mpec.complementarity` frontend                      | §4.1 | M | ✅ shipped |
 | 11 | Box-MCP / doubly-bounded canonical form `ℓ ≤ x ≤ u ⊥ F(x)`   | §4.9 | M | ✅ shipped |
-| 12 | Stateful warm hot-start solver object (MPC rolling-horizon)  | §6.5 | M | planned |
+| 12 | Stateful warm hot-start solver object (MPC rolling-horizon)  | §6.5 | M | ✅ shipped |
 | 13 | PATH-style multi-merit & degeneracy termination diagnostics  | §2.7 | S | ✅ |
 | 14 | Parallel multistart (`n_jobs`)                               | §6.1 | S | planned |
 | 15 | Additional NCPs (Chen-Mangasarian, Billups, Veelken-Ulbrich, median) | §3.5 ext | S | planned |
@@ -997,38 +997,65 @@ comp_residual, CQ_class, stationarity, n_iter, time) for paper figures.
 
 CLI (planned): `python -m pympcc.benchmarks.macmpec --from-nl path/`.
 
-### 6.5. Stateful warm hot-start solver object — (M) · *priority 12*
+### 6.5. Stateful warm hot-start solver object ✅ *(shipped)*
 
-Today `MPCCSolver.solve()` is one-shot.  For MPC rolling-horizon control,
-parametric continuation, and outer hyperparameter loops, the dominant
-cost is *reconstruction*: building the NLP, factoring KKT once, refining
-multipliers.  Repeated solves on near-identical problems should reuse:
-
-* Last `x*`, `λ*`, `μ*` (multipliers for `g`, `h`, `G`, `H`).
-* Last barrier parameter `μ` and step `α` from IPOPT.
-* Active-set summary from §2.6 TNLP refinement.
-* Presolve `PresolveMap` (when problem dimensions are stable).
-* Optionally, the IPOPT internal state via cyipopt's `solve()` reuse.
-
-API:
+`MPCCSolver.resolve(problem_k, *, warm_x0=True, warm_dual=True)` re-solves
+a near-identical MPCC reusing the previous result's state.  Workflow:
 
 ```python
-solver = pympcc.MPCCSolver(problem, ...)
-result_0 = solver.solve()            # cold
-problem_1 = update_parameters(...)   # change F(x; θ_1)
-result_1 = solver.resolve(problem_1) # warm — reuses x*, λ*, μ
+solver = pympcc.MPCCSolver(problem_0, strategy="scholtes")
+result_0 = solver.solve()             # cold; establishes the baseline
+problem_1 = update_parameters(...)    # same structure, new numeric values
+result_1 = solver.resolve(problem_1)  # warm — seeds x*, multipliers
 ```
 
-`solver.resolve()` validates that the *structure* (n, m, sparsity) is
-unchanged; only numeric values may differ.  Falls back to cold start if
-structure changed.  `result_k.warmstart_savings_iter` reports how many
-inner iterations were saved vs the cold baseline.
+State retained across calls:
 
-This is the canonical KNITRO / PATH usage pattern for repeated solves
-and unblocks pympcc as an MPC inner solver.
+* Final-iterate multipliers (`mult_g`, `mult_x_L`, `mult_x_U`) from the
+  strategy's last `_timed_solve`, in whichever constraint layout the
+  strategy uses (so e.g. the lifted layout used by `slack` chains
+  cleanly).
+* `result.x` — clipped onto the new variable bounds before becoming the
+  next `problem.x0`.
+* IPOPT's `warm_start_init_point=yes` is armed before the first inner
+  solve so the seeded multipliers are honoured immediately rather than
+  waiting until iteration 1 of an ε-continuation outer loop.
 
-Module: extension to `pympcc/solver.py` (`MPCCSolver.resolve()`,
-state-retention struct).
+Structure validation: a fingerprint over `(n, n_comp, n_eq, n_ineq)` plus
+each declared Jacobian sparsity pattern is compared against the original
+problem.  Different fingerprint → emit `UserWarning` and fall back to a
+cold rebuild of the strategy.  Same fingerprint → swap problem references
+in place; the strategy rebuilds its NLP on every `solve()` so no stale
+closures survive.
+
+`result.n_ipopt_iter_total` reports total IPOPT iterations across every
+inner NLP solve (sum over `history` for iterative strategies, single
+count for `direct`).  `result.warmstart_savings_iter` reports
+`cold_baseline - warm_total`; populated only on warm `resolve()` calls,
+`None` on cold solves and after a structure-change cold-fallback.
+
+Limitations / explicit non-goals:
+
+* `autoscale` is **not** re-applied on `resolve()`; rescaling comp pairs
+  would invalidate the seeded multipliers.  Reconstruct the solver if
+  fresh autoscale is required.
+* Strategy choice is fixed at construction; switching strategy
+  mid-session is unsupported (multiplier layouts differ).
+* Presolve runs identically to the original construction (re-applied
+  when `presolve=True` was originally set).
+* IPOPT's internal barrier state is not threaded through cyipopt — the
+  warm-start is at the multiplier level, not the IP-solver-internals
+  level.
+
+Module: `pympcc/solver.py` — `MPCCSolver.resolve`,
+`_problem_signature`, `_populate_warmstart_fields`, `_cold_restart`.
+Plumbing: `BaseStrategy._initial_warm_dual` (one-shot seed) +
+`_last_solve_state` (refreshed every `_timed_solve`); explicit warm-seed
+consumption in `DirectStrategy.solve`,
+`AugmentedLagrangianStrategy.solve`, and
+`BaseStrategy._run_epsilon_continuation` (covers Scholtes, smoothing,
+Lin–Fukushima, slack, NCPs).
+Tests: `tests/test_resolve.py` (12 cases).
 
 ### 6.6. NLPEC modifier matrix — (M) · *priority 17*
 

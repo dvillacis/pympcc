@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Callable, Literal, Optional, Union
 
 import numpy as np
@@ -43,6 +44,42 @@ def _as_mpcc_problem(problem: ProblemLike) -> MPCCProblem:
     if isinstance(problem, StructuredMPCC):
         return problem.to_mpcc_problem()
     return problem
+
+
+def _problem_signature(problem: MPCCProblem) -> tuple:
+    """Hashable fingerprint of an MPCCProblem's structural shape.
+
+    Two problems share a signature when every NLP-shaping dimension and
+    every Jacobian sparsity pattern matches.  Used by
+    :meth:`MPCCSolver.resolve` to detect whether the warm-start state from
+    the previous solve is reusable: equal signatures → safe warm-start;
+    different signatures → cold-fallback (rebuild strategy).
+
+    The fingerprint uses ``len(rows)`` plus the integer sums of ``rows``
+    and ``cols`` for each declared sparsity pattern.  That's stable across
+    permutations of identical patterns (``np.lexsort`` may have reordered
+    one but not the other) and cheap enough that ``resolve`` calls don't
+    pay an O(nnz) hash on every invocation.
+    """
+    def _sp_sig(sp):
+        if sp is None:
+            return ("dense",)
+        rows, cols = sp
+        rows_a = np.asarray(rows)
+        cols_a = np.asarray(cols)
+        return ("sparse", int(rows_a.size),
+                int(rows_a.sum()) if rows_a.size else 0,
+                int(cols_a.sum()) if cols_a.size else 0)
+    return (
+        int(problem.n),
+        int(problem.n_comp),
+        int(problem.n_eq),
+        int(problem.n_ineq),
+        _sp_sig(problem.comp_G_jacobian_sparsity),
+        _sp_sig(problem.comp_H_jacobian_sparsity),
+        _sp_sig(problem.eq_jacobian_sparsity),
+        _sp_sig(problem.ineq_jacobian_sparsity),
+    )
 
 StrategyName = Literal[
     "direct", "scholtes", "smoothing", "lin_fukushima",
@@ -258,6 +295,18 @@ class MPCCSolver:
         self._b_stat_max_biactive = b_stat_max_biactive
         self._tnlp_refine = tnlp_refine
         self._tnlp_max_iter = tnlp_max_iter
+        # Hot-start retention (§6.5).  Populated by :meth:`solve` so that
+        # :meth:`resolve` can warm-start subsequent solves with the same
+        # structure.  ``_signature`` lets resolve detect cold-fallback;
+        # ``_cold_baseline_iter`` is the IPOPT iter total of the very first
+        # solve and is used to compute ``warmstart_savings_iter``.
+        self._signature: tuple = _problem_signature(self.problem)
+        self._last_result: Optional[MPCCResult] = None
+        self._cold_baseline_iter: Optional[int] = None
+        self._presolve_on: bool = bool(presolve)
+        self._autoscale_on: bool = bool(autoscale)
+        self._strategy_cls = _STRATEGIES[strategy]
+        self._linear_solver_fn = linear_solver_fn
 
     def solve(self) -> MPCCResult:
         """Run the solver and return an :class:`MPCCResult`."""
@@ -280,7 +329,151 @@ class MPCCSolver:
         self._attach_per_pair_status(result)
         if self._tnlp_refine:
             self._attach_tnlp_refinement(result)
+        # §6.5 hot-start telemetry & state retention.
+        self._populate_warmstart_fields(result)
+        self._last_result = result
         return result
+
+    def _populate_warmstart_fields(self, result: MPCCResult) -> None:
+        """Aggregate IPOPT iter counts and seed cold-baseline / savings.
+
+        Direct strategy has no ``history``; for that case the strategy's
+        last ``_timed_solve`` left ``_last_solve_state`` populated and the
+        NLP object's ``n_ipopt_iter`` is the total.  Iterative strategies
+        report per-outer-iteration counts in ``history`` which we sum.
+        """
+        if result.history:
+            n_iter = sum(int(it.n_ipopt_iter) for it in result.history)
+        else:
+            # Direct path — read from the strategy's last NLP object.  The
+            # strategy stashed ``_last_solve_state`` on the BaseStrategy
+            # in ``_timed_solve`` but the iter count lives on the cyipopt
+            # adapter; pull it from a side-channel attribute we add below.
+            n_iter = int(getattr(self._strategy, "_last_n_ipopt_iter", 0) or 0)
+        result.n_ipopt_iter_total = n_iter
+        if self._cold_baseline_iter is None:
+            self._cold_baseline_iter = n_iter
+        else:
+            result.warmstart_savings_iter = self._cold_baseline_iter - n_iter
+
+    def resolve(
+        self,
+        problem: ProblemLike,
+        *,
+        warm_x0: bool = True,
+        warm_dual: bool = True,
+    ) -> MPCCResult:
+        """Re-solve a near-identical MPCC reusing the previous result's state.
+
+        Parameters
+        ----------
+        problem : MPCCProblem or StructuredMPCC
+            The new problem.  Must share the structural signature
+            (``n``, ``n_comp``, ``n_eq``, ``n_ineq``, every Jacobian
+            sparsity pattern) of the problem this solver was constructed
+            with; numeric values may differ freely.
+        warm_x0 : bool
+            When ``True`` (default), seed the new ``problem.x0`` with the
+            previous result's ``x*`` (clipped onto the new variable
+            bounds).  When ``False``, use whatever ``x0`` the new problem
+            carries.
+        warm_dual : bool
+            When ``True`` (default), forward the previous solve's
+            ``mult_g`` / ``mult_x_L`` / ``mult_x_U`` to IPOPT and toggle
+            ``warm_start_init_point=yes`` on the first inner solve.
+
+        Returns
+        -------
+        MPCCResult
+            ``result.warmstart_savings_iter`` carries the IPOPT iter
+            delta vs the cold-baseline solve.
+
+        Notes
+        -----
+        - When the structural signature changes, this method emits a
+          ``UserWarning`` and falls back to a cold-rebuild of the strategy.
+          The cold-rebuild's iter count becomes the new baseline.
+        - ``autoscale`` is intentionally not re-applied on resolve: rescaling
+          comp pairs would invalidate the warm dual.  Reconstruct the solver
+          if you need a fresh autoscale probe.
+        - Subsequent ``solve()`` calls on the same instance also act as
+          warm-restarts (the warm state persists); ``resolve`` is the
+          intended entry point because it lets you swap the problem in.
+        """
+        if self._last_result is None:
+            raise RuntimeError(
+                "MPCCSolver.resolve() requires a prior solve(); "
+                "call solve() first to establish the warm-start baseline."
+            )
+        new_orig = _as_mpcc_problem(problem)
+        new_sig = _problem_signature(new_orig)
+        if new_sig != self._signature:
+            warnings.warn(
+                "MPCCSolver.resolve(): problem structure changed "
+                f"(was {self._signature}, now {new_sig}); "
+                "rebuilding strategy from scratch (cold start).",
+                UserWarning,
+                stacklevel=2,
+            )
+            return self._cold_restart(new_orig)
+
+        # Swap problem references in place; presolve and autoscale are
+        # re-applied only when they were originally on, so warm semantics
+        # match cold semantics for the same solver configuration.
+        self.problem_orig = new_orig
+        if self._presolve_on:
+            self.problem, self._presolve_map = _presolve(self.problem_orig)
+        else:
+            self.problem = self.problem_orig
+            self._presolve_map = None
+        # Strategy holds its own reference to the problem; refresh it so
+        # callbacks see the new numeric values.
+        self._strategy.problem = self.problem
+
+        if warm_x0:
+            x_seed = np.clip(
+                np.asarray(self._last_result.x, dtype=float),
+                self.problem.xl,
+                self.problem.xu,
+            )
+            self.problem.x0 = x_seed
+
+        if warm_dual:
+            seed = self._strategy._last_solve_state or {}
+            cleaned = {k: v for k, v in seed.items() if v is not None}
+            if cleaned:
+                self._strategy._initial_warm_dual = cleaned
+
+        return self.solve()
+
+    def _cold_restart(self, new_orig: MPCCProblem) -> MPCCResult:
+        """Tear down the strategy, reset baselines, rebuild from *new_orig*."""
+        self.problem_orig = new_orig
+        if self._presolve_on:
+            self.problem, self._presolve_map = _presolve(self.problem_orig)
+        else:
+            self.problem = self.problem_orig
+            self._presolve_map = None
+        if self._autoscale_on:
+            self._apply_autoscale()
+        self._signature = _problem_signature(self.problem)
+        self._cold_baseline_iter = None
+        self._last_result = None
+        callback = self._strategy.callback
+        inner_callback = self._strategy.inner_callback
+        time_limit = self._strategy.time_limit
+        self._strategy = self._strategy_cls(
+            self.problem, self.ipopt_options,
+            backend=self.backend,
+            solver_options=self.solver_options,
+            callback=callback,
+            inner_callback=inner_callback,
+            time_limit=time_limit,
+            **self.strategy_options,
+        )
+        if self._linear_solver_fn is not None:
+            self._strategy._linear_solver_fn = self._linear_solver_fn
+        return self.solve()
 
     def _apply_autoscale(self) -> None:
         """Populate ``problem.comp_G_scale`` / ``comp_H_scale`` from a probe.

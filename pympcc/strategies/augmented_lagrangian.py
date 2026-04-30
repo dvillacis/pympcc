@@ -324,7 +324,13 @@ class AugmentedLagrangianStrategy(BaseStrategy):
         history: list[IterationInfo] = []
         x = p.x0.copy()
         last_info: dict = {}
+        # Hot-start seed (§6.5): consume the warm dual injected by
+        # :meth:`MPCCSolver.resolve` on the first inner solve.
         warm_dual: dict = {}
+        if self._initial_warm_dual:
+            warm_dual = dict(self._initial_warm_dual)
+            self._initial_warm_dual = None
+            nlp.add_option("warm_start_init_point", "yes")
         prev_comp_residual = np.inf
         stagnation_count = 0
         total_time: float = 0.0

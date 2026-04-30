@@ -172,6 +172,13 @@ class MPCCResult:
     jac_col_norms: Optional[dict] = None
     degeneracy_report: Optional[dict] = None
     initial_point_stats: Optional[dict] = None
+    # Hot-start telemetry (§6.5).  ``n_ipopt_iter_total`` aggregates the
+    # IPOPT iteration counts across every inner NLP solve for this result;
+    # ``warmstart_savings_iter`` is populated on warm
+    # :meth:`MPCCSolver.resolve` calls and reports the iteration delta vs
+    # the cold-baseline solve recorded by the same solver instance.
+    n_ipopt_iter_total: Optional[int] = None
+    warmstart_savings_iter: Optional[int] = None
 
     def unscale_comp_multipliers(
         self,
