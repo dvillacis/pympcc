@@ -1040,6 +1040,48 @@ def _make_constraint_callable(
     return _value, _grad, sparsity_cols
 
 
+def _make_jac_row_writer(
+    body: NLBody, con_idx: int
+) -> tuple[Any, Any, np.ndarray]:
+    """Like :func:`_make_constraint_callable` but the gradient pathway
+    writes directly into a caller-provided ``out`` slice aligned with
+    ``sparsity_cols``.
+
+    Avoids the per-call ``dict.items()`` iteration and ``int(col)`` casts
+    in :func:`_h_bulk_jac` etc.; for problems with thousands of comp /
+    eq rows this is the difference between minutes and seconds per
+    Jacobian callback.
+    """
+    nl_node = body.nl_cons.get(con_idx)
+    lin_terms = body.jac_lin.get(con_idx, [])
+    lin_idx = np.array([v for v, _ in lin_terms], dtype=np.intp)
+    lin_coef = np.array([c for _, c in lin_terms], dtype=float)
+
+    nl_vars = sorted(_collect_vars(nl_node)) if nl_node is not None else []
+    all_vars = sorted(set(int(v) for v in lin_idx) | set(nl_vars))
+    sparsity_cols = np.array(all_vars, dtype=np.intp)
+    col_to_local = {int(c): i for i, c in enumerate(sparsity_cols)}
+    lin_local = np.array(
+        [col_to_local[int(v)] for v, _ in lin_terms], dtype=np.intp
+    )
+
+    def _value(x: np.ndarray) -> float:
+        v_nl = eval_value(nl_node, x) if nl_node is not None else 0.0
+        v_lin = float(np.dot(lin_coef, x[lin_idx])) if lin_idx.size else 0.0
+        return v_nl + v_lin
+
+    def _row(x: np.ndarray, out: np.ndarray) -> None:
+        out[:] = 0.0
+        if nl_node is not None:
+            _, partials = eval_grad(nl_node, x)
+            for v, p in partials.items():
+                out[col_to_local[v]] = p
+        if lin_local.size:
+            out[lin_local] += lin_coef
+
+    return _value, _row, sparsity_cols
+
+
 def _collect_vars(node: OpNode) -> set[int]:
     """Recursively collect every variable index referenced in ``node``."""
     if node.kind == "var":
@@ -1144,24 +1186,26 @@ def from_nl(path: Union[str, Path]) -> Any:
     comp_con_idx = {ci for _, ci in comp_pairs} | r_comp_cons
     n_compl_pairs = len(comp_pairs)
 
-    eq_callables: list[tuple[Any, Any, np.ndarray, float]] = []
-    ineq_callables: list[tuple[Any, Any, np.ndarray, float, float]] = []
+    # Per-row writers: (value_fn, row_writer, sparsity_cols).
+    # rhs_or_lo, hi: equality bound is a single value (cb[1]); inequalities
+    # split into 1-2 rows below.
+    eq_writers: list[tuple[Any, Any, np.ndarray, float]] = []
+    ineq_writers: list[tuple[Any, Any, np.ndarray, float, float]] = []
 
     for ci in range(header.n_con):
         if ci in comp_con_idx:
             continue   # handled via comp_var_pairs_bulk below
         cb = body.con_bounds[ci] if ci < len(body.con_bounds) else (3.0,)
         btype = int(cb[0])
-        val_fn, grad_fn, cols = _make_constraint_callable(body, ci)
+        val_fn, row_fn, cols = _make_jac_row_writer(body, ci)
         if btype == 4:                        # equality
-            eq_callables.append((val_fn, grad_fn, cols, cb[1]))
+            eq_writers.append((val_fn, row_fn, cols, cb[1]))
         elif btype == 0:                      # range
-            # split into c(x) - b ≤ 0 and a - c(x) ≤ 0
-            ineq_callables.append((val_fn, grad_fn, cols, cb[1], cb[2]))
+            ineq_writers.append((val_fn, row_fn, cols, cb[1], cb[2]))
         elif btype == 1:                      # upper only
-            ineq_callables.append((val_fn, grad_fn, cols, -_INF, cb[1]))
+            ineq_writers.append((val_fn, row_fn, cols, -_INF, cb[1]))
         elif btype == 2:                      # lower only
-            ineq_callables.append((val_fn, grad_fn, cols, cb[1], _INF))
+            ineq_writers.append((val_fn, row_fn, cols, cb[1], _INF))
         elif btype == 3:                      # free → no constraint
             continue
         else:
@@ -1169,47 +1213,47 @@ def from_nl(path: Union[str, Path]) -> Any:
                 f"unsupported constraint bound type {btype} on con {ci}"
             )
 
-    # Build complementarity bulk callables.
+    # Build complementarity bulk callables (sparse, single-pass writes).
     comp_kwargs: dict[str, Any] = {}
     if n_compl_pairs > 0:
         var_idxs = np.array([v for v, _ in comp_pairs], dtype=np.intp)
         comp_con_list = [ci for _, ci in comp_pairs]
+        comp_writers = [_make_jac_row_writer(body, ci) for ci in comp_con_list]
 
-        # Per-row callables for h_i(x) (the constraint side).
-        comp_callables = [_make_constraint_callable(body, ci) for ci in comp_con_list]
-
-        # Build sparsity pattern for h_bulk_jac.
-        rows_blocks = []
-        cols_blocks = []
-        for i, (_v, _g, cols) in enumerate(comp_callables):
-            rows_blocks.append(np.full(cols.size, i, dtype=np.intp))
-            cols_blocks.append(cols)
-        h_jac_rows = (
-            np.concatenate(rows_blocks) if rows_blocks else np.empty(0, dtype=np.intp)
+        comp_row_sizes = np.array(
+            [w[2].size for w in comp_writers], dtype=np.intp
         )
-        h_jac_cols = (
-            np.concatenate(cols_blocks) if cols_blocks else np.empty(0, dtype=np.intp)
-        )
-        row_sizes = np.array([c[2].size for c in comp_callables], dtype=np.intp)
-        row_offsets = np.concatenate(([0], np.cumsum(row_sizes))).astype(np.intp)
+        comp_row_offsets = np.concatenate(
+            ([0], np.cumsum(comp_row_sizes))
+        ).astype(np.intp)
+        h_jac_rows = np.concatenate(
+            [np.full(w[2].size, i, dtype=np.intp)
+             for i, w in enumerate(comp_writers)]
+        ) if comp_writers else np.empty(0, dtype=np.intp)
+        h_jac_cols = np.concatenate(
+            [w[2] for w in comp_writers]
+        ) if comp_writers else np.empty(0, dtype=np.intp)
+        comp_total_nnz = int(comp_row_offsets[-1])
+        comp_value_fns = [w[0] for w in comp_writers]
+        comp_row_fns = [w[1] for w in comp_writers]
 
-        def _h_bulk(x: np.ndarray, _cb=comp_callables) -> np.ndarray:
-            out = np.empty(len(_cb))
-            for i, (vfn, _g, _c) in enumerate(_cb):
-                out[i] = vfn(x)
+        def _h_bulk(
+            x: np.ndarray, _vfns=comp_value_fns
+        ) -> np.ndarray:
+            out = np.empty(len(_vfns))
+            for i in range(len(_vfns)):
+                out[i] = _vfns[i](x)
             return out
 
         def _h_bulk_jac(
             x: np.ndarray,
-            _cb=comp_callables,
-            _off=row_offsets,
-            _nnz=int(h_jac_rows.size),
+            _rfns=comp_row_fns,
+            _off=comp_row_offsets,
+            _nnz=comp_total_nnz,
         ) -> np.ndarray:
             out = np.empty(_nnz)
-            for i, (_v, gfn, cols) in enumerate(_cb):
-                _, partials = gfn(x)
-                for j, col in enumerate(cols):
-                    out[_off[i] + j] = partials.get(int(col), 0.0)
+            for i in range(len(_rfns)):
+                _rfns[i](x, out[_off[i]:_off[i + 1]])
             return out
 
         comp_kwargs.update(
@@ -1224,64 +1268,113 @@ def from_nl(path: Union[str, Path]) -> Any:
     else:
         comp_kwargs["n_comp"] = 0
 
-    # Eq/ineq blocks.
+    # Equality block: sparse, flat-values Jacobian.
     eq_kwargs: dict[str, Any] = {}
-    if eq_callables:
-        rhs = np.array([rhs for _, _, _, rhs in eq_callables])
+    if eq_writers:
+        eq_row_sizes = np.array(
+            [w[2].size for w in eq_writers], dtype=np.intp
+        )
+        eq_row_offsets = np.concatenate(
+            ([0], np.cumsum(eq_row_sizes))
+        ).astype(np.intp)
+        eq_jac_rows = np.concatenate(
+            [np.full(w[2].size, i, dtype=np.intp)
+             for i, w in enumerate(eq_writers)]
+        )
+        eq_jac_cols = np.concatenate([w[2] for w in eq_writers])
+        eq_total_nnz = int(eq_row_offsets[-1])
+        eq_value_fns = [w[0] for w in eq_writers]
+        eq_row_fns = [w[1] for w in eq_writers]
+        eq_rhs = np.array([w[3] for w in eq_writers], dtype=float)
 
-        def _eq_constraints(x: np.ndarray, _ec=eq_callables, _r=rhs) -> np.ndarray:
-            return np.array([fn(x) - _r[i] for i, (fn, _g, _c, _) in enumerate(_ec)])
+        def _eq_constraints(
+            x: np.ndarray, _vfns=eq_value_fns, _r=eq_rhs
+        ) -> np.ndarray:
+            out = np.empty(len(_vfns))
+            for i in range(len(_vfns)):
+                out[i] = _vfns[i](x)
+            return out - _r
 
-        # Build dense eq Jacobian for now; sparse path can come later.
-        def _eq_jac(x: np.ndarray, _ec=eq_callables, _n=n_var) -> np.ndarray:
-            J = np.zeros((len(_ec), _n))
-            for i, (_fn, gfn, _c, _) in enumerate(_ec):
-                _, partials = gfn(x)
-                for k, v in partials.items():
-                    J[i, k] = v
-            return J
+        def _eq_jac(
+            x: np.ndarray,
+            _rfns=eq_row_fns,
+            _off=eq_row_offsets,
+            _nnz=eq_total_nnz,
+        ) -> np.ndarray:
+            out = np.empty(_nnz)
+            for i in range(len(_rfns)):
+                _rfns[i](x, out[_off[i]:_off[i + 1]])
+            return out
 
-        eq_kwargs["n_eq"] = len(eq_callables)
+        eq_kwargs["n_eq"] = len(eq_writers)
         eq_kwargs["eq_constraints"] = _eq_constraints
         eq_kwargs["eq_jacobian"] = _eq_jac
+        eq_kwargs["eq_jacobian_sparsity"] = (eq_jac_rows, eq_jac_cols)
 
+    # Inequality block: each writer contributes 1-2 rows (lo and/or hi).
+    # Sparse, flat-values Jacobian.
     ineq_kwargs: dict[str, Any] = {}
-    if ineq_callables:
-        n_ineq_rows = sum(
-            (1 if hi != _INF else 0) + (1 if lo != -_INF else 0)
-            for _fn, _g, _c, lo, hi in ineq_callables
+    if ineq_writers:
+        # Materialise a flat list of physical rows: (writer_idx, sign, bias).
+        # Final residual = sign * c(x) + bias; row values = sign * jac_row.
+        ineq_rows_meta: list[tuple[int, float, float]] = []
+        for w_idx, (_vfn, _rfn, _cols, lo, hi) in enumerate(ineq_writers):
+            if hi != _INF:
+                ineq_rows_meta.append((w_idx, +1.0, -hi))   # c - hi ≤ 0
+            if lo != -_INF:
+                ineq_rows_meta.append((w_idx, -1.0, lo))    # lo - c ≤ 0
+
+        n_ineq_rows = len(ineq_rows_meta)
+        ineq_row_sizes = np.array(
+            [ineq_writers[m[0]][2].size for m in ineq_rows_meta],
+            dtype=np.intp,
         )
-        # Each entry contributes either 1 or 2 rows depending on bounds.
-        def _ineq_rows(
-            x: np.ndarray, _ic=ineq_callables
+        ineq_row_offsets = np.concatenate(
+            ([0], np.cumsum(ineq_row_sizes))
+        ).astype(np.intp)
+        ineq_jac_rows = np.concatenate(
+            [np.full(s, i, dtype=np.intp)
+             for i, s in enumerate(ineq_row_sizes)]
+        )
+        ineq_jac_cols = np.concatenate(
+            [ineq_writers[m[0]][2] for m in ineq_rows_meta]
+        )
+        ineq_total_nnz = int(ineq_row_offsets[-1])
+        ineq_value_fns = [ineq_writers[m[0]][0] for m in ineq_rows_meta]
+        ineq_row_fns = [ineq_writers[m[0]][1] for m in ineq_rows_meta]
+        ineq_signs = np.array([m[1] for m in ineq_rows_meta], dtype=float)
+        ineq_biases = np.array([m[2] for m in ineq_rows_meta], dtype=float)
+
+        def _ineq_rows_fn(
+            x: np.ndarray,
+            _vfns=ineq_value_fns,
+            _signs=ineq_signs,
+            _biases=ineq_biases,
         ) -> np.ndarray:
-            out = []
-            for fn, _g, _c, lo, hi in _ic:
-                v = fn(x)
-                if hi != _INF:
-                    out.append(v - hi)         # c - hi ≤ 0
-                if lo != -_INF:
-                    out.append(lo - v)         # lo - c ≤ 0
-            return np.array(out)
+            out = np.empty(len(_vfns))
+            for i in range(len(_vfns)):
+                out[i] = _vfns[i](x)
+            return _signs * out + _biases
 
         def _ineq_jac(
-            x: np.ndarray, _ic=ineq_callables, _n=n_var
+            x: np.ndarray,
+            _rfns=ineq_row_fns,
+            _off=ineq_row_offsets,
+            _signs=ineq_signs,
+            _nnz=ineq_total_nnz,
         ) -> np.ndarray:
-            rows: list[np.ndarray] = []
-            for _fn, gfn, _c, lo, hi in _ic:
-                _, partials = gfn(x)
-                row = np.zeros(_n)
-                for k, val in partials.items():
-                    row[k] = val
-                if hi != _INF:
-                    rows.append(row.copy())
-                if lo != -_INF:
-                    rows.append(-row.copy())
-            return np.vstack(rows) if rows else np.zeros((0, _n))
+            out = np.empty(_nnz)
+            for i in range(len(_rfns)):
+                sl = out[_off[i]:_off[i + 1]]
+                _rfns[i](x, sl)
+                if _signs[i] != 1.0:
+                    sl *= _signs[i]
+            return out
 
         ineq_kwargs["n_ineq"] = n_ineq_rows
-        ineq_kwargs["ineq_constraints"] = _ineq_rows
+        ineq_kwargs["ineq_constraints"] = _ineq_rows_fn
         ineq_kwargs["ineq_jacobian"] = _ineq_jac
+        ineq_kwargs["ineq_jacobian_sparsity"] = (ineq_jac_rows, ineq_jac_cols)
 
     return MPCCProblem(
         n=n_var,
