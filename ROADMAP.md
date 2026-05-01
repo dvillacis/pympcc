@@ -41,12 +41,35 @@ PATH/KNITRO parity gaps; 14–17 are smaller polish items.
 | 11 | Box-MCP / doubly-bounded canonical form `ℓ ≤ x ≤ u ⊥ F(x)`   | §4.9 | M | ✅ shipped |
 | 12 | Stateful warm hot-start solver object (MPC rolling-horizon)  | §6.5 | M | ✅ shipped |
 | 13 | PATH-style multi-merit & degeneracy termination diagnostics  | §2.7 | S | ✅ |
-| 14 | Parallel multistart (`n_jobs`)                               | §6.1 | S | planned |
-| 15 | Additional NCPs (Chen-Mangasarian, Billups, Veelken-Ulbrich, median) | §3.5 ext | S | planned |
-| 16 | EPEC multi-leader KKT emitter                                | §5.5 | M | planned |
-| 17 | NLPEC modifier matrix (slack × constraint × aggregate × NCPBounds) | §6.6 | M | planned |
+| 14 | Parallel multistart (`n_jobs`)                               | §6.1 | S | ✅ shipped |
+| 15 | Additional NCPs (Chen-Mangasarian, Billups, Veelken-Ulbrich, median) | §3.5 ext | S | ✅ shipped |
+| 16 | EPEC multi-leader KKT emitter                                | §5.5 | M | v1 ✅ shipped (diagonalised KKT-stack, JAX); v2 (private leader constraints) deferred |
+| 17 | NLPEC modifier matrix (slack × constraint × aggregate × NCPBounds) | §6.6 | M | Phase 1 ✅ shipped (`ncp_function` + `ncp_params`); Phase 2 deferred |
 | 18 | MPECopt-style piecewise-SQP (finite-step B-stationarity)     | §3.8 | L | research |
 | 19 | Raghunathan-Biegler IPOPT-C (modified barrier interior point) | §3.9 | L | deferred |
+
+### Phase 3 — feature freeze; hardening for community release (planned)
+
+Feature work pauses here.  The package is broadly functional but
+carries enough audit-flagged debt to be uncomfortable as a public
+research-grade tool.  Phase 3 collects all the *non-feature* work that
+needs to ship before a 1.0 release: hot-path performance, API surface
+hygiene, packaging hygiene, and a hardened correctness baseline.  See
+§7 for the full audit findings.
+
+| #  | Item                                                       | Section | Scope | Status  |
+|----|------------------------------------------------------------|---------|-------|---------|
+| 20 | Hot-path callback / kernel cleanup                         | §7.1    | S     | planned |
+| 21 | Strategy `__init__` / NCP-class deduplication              | §7.2    | M     | planned |
+| 22 | God-module split (`problem.py`, `_base.py`, `_presolve.py`)| §7.2    | M     | planned |
+| 23 | Centralised `_constants.py`                                | §7.2    | S     | planned |
+| 24 | Multistart worker robustness + seed plumbing               | §7.3    | S     | planned |
+| 25 | Time-limit honouring inside IPOPT solve                    | §7.3    | S     | planned |
+| 26 | Specific-exception sweep (replace bare `except Exception`) | §7.3    | S     | planned |
+| 27 | LICENSE / CONTRIBUTING / CODE_OF_CONDUCT / AUTHORS files   | §7.4    | S     | planned |
+| 28 | API re-exports + typing tightening (Literal, return types) | §7.4    | S     | planned |
+| 29 | Strategy-selection guide + troubleshooting docs            | §7.4    | M     | planned |
+| 30 | pre-commit + Python 3.13 in CI matrix                      | §7.5    | S     | planned |
 
 ---
 
@@ -421,29 +444,45 @@ Each lands as its own thin strategy class reusing the smoothing
 
 Module: `pympcc/strategies/ncp.py` — `SmoothMinStrategy`, `ChenChenKanzowStrategy`, `KanzowSchwartzStrategy`. ✅ Shipped in 0.4.2.
 
-**Phase-2 additions (§3.5 ext, priority 15) — planned:**
+**Phase-2 additions (§3.5 ext, priority 15) — ✅ shipped:**
 
-GAMS-NLPEC's `equreform` table currently has 33 rows; pympcc has 9
-(direct, Scholtes, smoothing/FB, Lin-Fukushima, slack, augLag, plus the
-three NCPs above).  Closing the most-cited remaining gaps:
+GAMS-NLPEC's `equreform` table has 33 rows; pympcc now ships 13 distinct
+NCP-style reformulations (direct, Scholtes, smoothing/FB, Lin-Fukushima,
+slack, augLag, plus the seven NCPs in `pympcc/strategies/ncp.py`).
+Phase-2 additions:
 
-* **Chen-Mangasarian asymmetric** — `φ_α(a, b) = α·(a + b) − √(a² + b² + (1−α)·2ab)`
-  for `α ∈ (0, 1]`; the FB ↔ inner-product interpolation that NLPEC
-  exposes as `CMxf` / `CMfx`.
-* **Billups composite** — `φ(a, b) = φ_FB(a, b) − γ·a₊·b₊` with
-  γ-schedule; `Bill` / `fBill` in NLPEC.
-* **Veelken-Ulbrich smoothings** — `fVUsin`, `fVUpow` smooth perturbations
-  of the min-NCP that retain MFCQ near degeneracy.
-* **Median NCP for doubly-bounded variables** — `median(x − ℓ, x − u, F(x)) = 0`,
-  the alternative reformulation for box-MCP (§4.9).  Not strictly
-  required: box-MCP §4.9 already ships using a universal Billups slack
-  lift that any existing strategy can solve.  A median-NCP strategy
-  would skip the slack variables and reformulate complementarity in the
-  inequality block instead — useful for benchmarking against NLPEC's
-  `med` row, otherwise optional.
+* **`ChenMangasarianStrategy` (`chen_mangasarian`)** ✅ — α-asymmetric
+  FB↔min interpolation
+  `φ_{α,ε}(G, H) = (G + H) − √(G² + H² − 2α·G·H + ε²)` for
+  `α ∈ [0, 1]`.  At `α = 0` this is smoothed Fischer-Burmeister; at
+  `α = 1` it equals `(G+H) − |G−H| = 2·min(G, H)`.  Matches NLPEC's
+  `CMxf` / `CMfx`.
+* **`BillupsStrategy` (`billups`)** ✅ — composite
+  `φ_{γ,ε}(G, H) = φ_FB,ε(G, H) − γ · G₊_ε · H₊_ε` with smoothed
+  positive parts `t₊_ε = ½(t + √(t² + ε²))`.  Default `γ = 0.1`
+  (larger values introduce spurious infeasibility at finite ε); tied
+  to NLPEC's `Bill` / `fBill`.
+* **`VeelkenUlbrichPowStrategy` (`veelken_ulbrich_pow`)** ✅ —
+  smooth-min `φ_ε(G, H) = ½(G + H − σ_ε^pow(G − H))` where
+  `σ_ε^pow` is the unique even degree-4 polynomial that matches `|·|`
+  with C² continuity at `|t| = ε`.  Maps to NLPEC's `fVUpow`.
+* **`VeelkenUlbrichSinStrategy` (`veelken_ulbrich_sin`)** ✅ —
+  smooth-min with `σ_ε^sin(t) = (2t/π)·arctan(πt/(2ε))`, a self-contained
+  C^∞ approximation of `|·|`.  Maps to NLPEC's `fVUsin`.
 
-Each lands as a thin strategy class (~80 LOC) reusing the smoothing
-ε-continuation harness.
+**Median NCP for doubly-bounded variables** — `median(x − ℓ, x − u, F(x)) = 0`,
+the alternative reformulation for box-MCP (§4.9).  Not strictly
+required: box-MCP §4.9 already ships using a universal Billups slack
+lift that any existing strategy can solve.  A median-NCP strategy
+would skip the slack variables and reformulate complementarity in the
+inequality block instead — useful for benchmarking against NLPEC's
+`med` row, otherwise optional.  Deferred.
+
+Each new strategy is a thin subclass of `_SmoothNCPBase` reusing the
+smoothing ε-continuation harness; no new infrastructure required.
+
+Module: `pympcc/strategies/ncp.py`.
+Tests: `tests/test_ncp_strategies.py` (98 cases).
 
 ### 3.8. Piecewise-SQP for finite-step B-stationarity — (L) · *priority 18 (research)*
 
@@ -817,40 +856,79 @@ differences (acceptable for prototyping).  No new dependencies.
 Module: `pympcc/bilevel.py`.
 Tests: `tests/test_bilevel.py` (23 cases).
 
-### 5.5. EPEC multi-leader emitter — (M) · *priority 16*
+### 5.5. EPEC multi-leader emitter — (M) · *priority 16* · **v1 shipped**
 
-Generalises §5.4 to *multiple* leaders sharing variables.  An EPEC
+Generalises §5.4 to *multiple* leaders sharing a common follower.  An
+EPEC
 
 ```
 For each leader i:
     min_{x_i, y}  F_i(x_i, x_{-i}, y)
-    s.t.          y ∈ argmin_y { f(x, y) : g(x, y) ≤ 0 }
+    s.t.          y ∈ argmin_y { f(x, y) : g(x, y) ≤ 0, h(x, y) = 0 }
 ```
 
-is reformulated by emitting each leader's MPCC KKT conditions and
-concatenating, producing a single large MPCC over
-`(x_1, …, x_n, y, λ_lower, μ_leaders)`.  This is the GAMS EMP
-"equilibrium" pattern; commercial coverage is thin (only EMP/NLPEC
-ships it directly).
+is reformulated by emitting each leader's MPCC stationarity conditions
+w.r.t. the common follower's KKT system, producing a single large
+MPCC over `(x_1, …, x_N, y, λ_lo, μ_lo, {ξ_i^y, ξ_i^h, θ_i, ν_i})`.
+This is the GAMS EMP "equilibrium" pattern; commercial coverage is thin
+(only EMP/NLPEC ships it directly).
+
+**Variable layout.**
+
+* `x_i` (size `n_x_i`) — leader-`i` private decisions
+* `y` (size `n_y`) — common follower
+* `λ_lo` (size `n_g`) — lower-level inequality multipliers (≥ 0)
+* `μ_lo` (size `n_h`) — lower-level equality multipliers (free)
+* per leader `i`: `ξ_i^y` (size `n_y`), `ξ_i^h` (size `n_h`),
+  `θ_i` (size `n_g`, ≥ 0), `ν_i` (size `n_g`, ≥ 0)
+
+**Equality rows** (per leader `i`):
+
+* `∂L_i/∂x_i = 0`     — leader-`i` stationarity in own block
+* `∂L_i/∂y  = 0`     — stationarity w.r.t. follower
+* `∂L_i/∂λ_lo = 0`   — couples `θ_i, ν_i` through `g_lo`
+* `∂L_i/∂μ_lo = 0`   — emitted only when `n_h > 0`
+
+plus the follower's own KKT residuals: `∇_y L_lo = 0` and `h_lo = 0`.
+
+**Complementarity rows.**
+
+* follower complementarity: `λ_lo ⊥ −g_lo(x, y)`
+* per leader `i`: `θ_i ⊥ −g_lo` and `ν_i ⊥ λ_lo`
 
 API:
 
 ```python
 mpcc = pympcc.bilevel.from_epec(
     leaders=[
-        pympcc.bilevel.Leader(F=..., g=..., h=...),
-        pympcc.bilevel.Leader(F=..., g=..., h=...),
+        pympcc.bilevel.Leader(n_x=1, F=..., x0=...),
+        pympcc.bilevel.Leader(n_x=1, F=..., x0=...),
     ],
-    common_lower=pympcc.bilevel.LowerLevel(f=..., g=..., h=...),
+    common_lower=pympcc.bilevel.LowerLevel(
+        n_y=1, f=..., n_g=1, g=..., y0=...,
+    ),
     derivatives="jax",
 )
 ```
 
-Reuses §5.4 KKT-emitter machinery; the new code is mostly bookkeeping
-for stitching leader blocks.
+**Implementation note (v1).** The leader Lagrangian is built once
+symbolically and `jax.grad` is reused across leaders via closure capture,
+so adding a leader costs only one extra `grad` trace.  The MPCC
+objective is identically zero (Nash equilibria are feasibility problems);
+strategies that emit complementarity as *equality* (e.g. `smoothing`)
+trip IPOPT's `NO_DOF` status on the over-determined KKT-stack and are
+not recommended for EPECs — `direct`, `scholtes`, and `lin_fukushima`
+all converge.
 
-Module: extension to `pympcc/bilevel.py` (new `Leader` /
-`from_epec` API).  Test set: standard MacEPEC instances.
+**Deferred to v2.** Per-leader private inequality / equality constraints
+(`Leader.g_priv`, `Leader.h_priv`) require an additional multiplier
+block per leader and have been left out of v1; they will land alongside
+MacEPEC benchmark coverage.
+
+Module: `pympcc/bilevel.py` — `Leader`, `LowerLevel`, `from_epec`.
+Tests: `tests/test_epec.py` (48 cases — two closed-form Nash toys,
+construction, error handling, solution diagnostics across three
+strategies).
 
 ### 5.6. JAX-differentiable solve via custom_vjp — (M) · ✅ shipped
 
@@ -909,18 +987,51 @@ compatibility) deferred.
 Items surfaced by the commercial-grade gap analysis that were not on the
 original roadmap.  Lower priority than §2–5 but relevant before a 1.0 release.
 
-### 6.1. Parallel multistart — (S)
+### 6.1. Parallel multistart — (S) · ✅ shipped
 
-`pympcc.multistart` currently runs starts sequentially.  Wrap the inner
-loop with `concurrent.futures.ProcessPoolExecutor` behind a
-`n_jobs` parameter (default ``1`` = sequential, ``-1`` = all CPUs).
-Each worker receives a deep-copied problem and a perturbed `x0`.  The
-`MultiStartResult` aggregates results as futures complete.
+`pympcc.multistart()` and `pympcc.solve(..., n_starts=N)` accept an
+``n_jobs`` parameter:
 
-Caveat: cyipopt / IPOPT must be fork-safe or use "spawn" start method;
-test on macOS where fork is restricted.
+* ``n_jobs=1`` (default) — sequential, in-process execution.  Bit-for-bit
+  identical to the pre-feature behaviour: same RNG stream, same start
+  ordering, same convergence trajectories.
+* ``n_jobs=-1`` — resolves to ``os.cpu_count()``.
+* Any other positive integer — fans the starts out across that many
+  workers via ``concurrent.futures.ProcessPoolExecutor`` using the
+  ``spawn`` start method (so cyipopt / IPOPT global state is freshly
+  initialised in each worker; safe on macOS, where ``fork`` is
+  restricted, and on Linux).
 
-Module: extend `pympcc/multistart.py`.  Tests: `tests/test_multistart.py`.
+**Determinism.**  All ``n_starts`` start vectors are pre-computed in the
+parent process from the seeded RNG *before* any work is dispatched.
+Completion order in the worker pool therefore does not perturb the seed
+stream — the same ``(seed, n_starts)`` produces the same starts and the
+same converged points regardless of ``n_jobs``.  Results are also
+re-sorted into start order before being returned, so callers see
+``runs[0]`` come from the unperturbed ``problem.x0`` exactly as in the
+sequential path.
+
+**Picklability requirement.**  When ``n_jobs != 1`` every callable on
+the ``MPCCProblem`` (``objective``, ``gradient``, ``comp_G``,
+``comp_G_jacobian``, ``comp_H``, ``comp_H_jacobian``, plus any
+``eq_*`` / ``ineq_*`` callbacks) must be picklable.  Top-level
+``def``-defined functions are fine; bare ``lambda`` and locally-defined
+closures are not.  The lambda-heavy idiom used in many test fixtures
+will fail to pickle and raise on the first ``submit()`` — a clear,
+non-silent error.  Build production problems out of named functions if
+you intend to parallelise.
+
+**Robustness.**  Worker exceptions are caught per-future and the start
+is skipped (matching the sequential path's "skip pathological starts
+and continue" semantics).  Only when *every* start fails does
+``multistart`` raise ``RuntimeError``.
+
+Modules: ``pympcc/multistart.py`` (``_resolve_n_jobs``,
+``_multistart_worker``, ``_run_sequential``, ``_run_parallel``);
+``pympcc/solver.py`` (``solve(..., n_jobs=...)`` plumbed through to
+``multistart``).
+Tests: ``tests/test_multistart.py`` (sequential),
+``tests/test_multistart_parallel.py`` (parallel).
 
 ### 6.2. Condition-number diagnostics at x* — (S) · ✅ shipped
 
@@ -1064,26 +1175,63 @@ GAMS-NLPEC's 33-row `equreform` is built from the cross-product of
 × 2 constraint types (`eq` / `ineq`) × 3 aggregate levels × 4 NCPBounds
 levels.  pympcc currently treats each row as a separate strategy class.
 
-Refactor to expose the modifiers as orthogonal options:
+The plan refactors the existing NCP code into orthogonal modifier axes
+exposed through a single `strategy="ncp"` entry point.  Phase 1 ships
+the registry + the `ncp_function` axis; Phases 2 lift the remaining
+axes (slack, constraint, aggregate, ncp_bounds).
+
+**Phase 1 — `ncp_function` registry (✅ shipped):**
 
 ```python
 result = pympcc.solve(
     problem,
     strategy="ncp",
-    ncp_function="fischer-burmeister",   # or "min", "ChenChenKanzow", …
-    slack="positive",                     # how G, H rows are slack-lifted
-    constraint="ineq",                    # phi(G,H) ≤ ε vs phi(G,H) = ε
-    aggregate="partial",                  # collapse rows of φ
-    ncp_bounds="all",                     # auto-bounds inferred for slacks
+    ncp_function="fischer_burmeister",   # any of 9 registry keys
+    ncp_params={"lam": 0.7},             # NCP-specific overrides
+    epsilon_0=1.0, reduction=0.1,        # standard ε-continuation options
 )
 ```
 
-Yields ~12-20 *effective* reformulations from the existing NCP code with
-no new theory.  Strategies become thin: pure orchestration over a single
-"NCP-reformulation builder" that consumes the modifier dict.
+Delivers a single configurable strategy that dispatches through the
+9-entry NCP registry in `pympcc/_reformulation.py`.  The registry is
+the single source of truth used by `NCPReformulationStrategy`; the
+classical strategy classes (`smoothing`, `smooth_min`,
+`chen_chen_kanzow`, …) keep working as canonical reference
+implementations.  Module additions: `pympcc/_reformulation.py`
+(NCP_REGISTRY + lookup_ncp helper), `pympcc/strategies/ncp_reformulation.py`
+(`NCPReformulationStrategy(_SmoothNCPBase)`).  Tests:
+`tests/test_ncp_reformulation.py` (70 cases — convergence across all 9
+NCPs, equivalence with each dedicated strategy, param overrides,
+error handling, sparse path).
 
-Module: refactor of `pympcc/strategies/_base.py` and
-`pympcc/strategies/ncp.py`; new `pympcc/_reformulation.py` builder.
+**Phase 2 — remaining modifier axes (deferred):**
+
+* **`slack` axis** (`none` / `positive` / `free` / `one`): introduces
+  `s_G = G(x)`, `s_H = H(x)` slack variables to keep the
+  complementarity Jacobian's x-block sparse.  Composes with every NCP
+  function in the registry; requires invasive refactoring of the
+  Jacobian assembly path shared with `pympcc/strategies/slack.py`.
+* **`constraint` axis** (`eq` / `ineq` / `band`): currently every
+  registry NCP is enforced as `φ_ε(G, H) = 0`.  Switching to
+  one-sided ineq (`φ ≤ ε`) or two-sided band (`-ε ≤ φ ≤ ε`) requires
+  per-NCP sign-convention bookkeeping — only `inner_product` is
+  consistently `≥ 0` in the feasible region; FB and smooth-min change
+  sign across `(G, H) ≥ 0`.  Two-sided band ineq additionally doubles
+  φ rows.  Defer alongside the slack-lifting refactor so the
+  bound/constraint plumbing is touched once.
+* **`aggregate` axis** (`none` / `partial` / `full`): collapses the
+  `n_comp` rows of φ into a single scalar via `sum φ` or `‖φ‖`,
+  matching NLPEC's aggregate column.  Cheap once the constraint axis
+  ships.
+* **`ncp_bounds` axis** (`none` / `lower` / `upper` / `all`):
+  auto-derives variable bounds for any slack/aggregate variables
+  introduced by the previous axes.  Bookkeeping-only.
+
+Phase 2 will land as a follow-up roadmap item once the slack-lifting
+refactor settles.  All three axes will route through the same
+`NCPReformulationStrategy` so the legacy strategy classes stay frozen
+as documentation of the canonical (`slack="none"`,
+`constraint="eq"`, `aggregate="none"`) configuration.
 
 ### 6.7. Reformulated-NLP dump — (S)
 
@@ -1103,6 +1251,375 @@ Targets:
 
 Module: new `pympcc/_dump.py`; `.nl` writer is the inverse of the
 existing `pympcc.frontend.ampl` reader.
+
+---
+
+## 7. Hardening for community release
+
+Audit dated 2026-05.  Captures performance, maintainability, correctness,
+API and packaging items uncovered after the feature work in §1–§6 plateaued.
+These are the things a contributor or end-user would hit on a fresh clone
+of the repo today; they are blocking a confident public 1.0.
+
+Scope tags follow the rest of the roadmap: **S** ≲ 200 lines + tests,
+**M** ~500–1500, **L** multi-week.  Severity:
+**P0** (blocks public release / correctness),
+**P1** (real friction — should land before 1.0),
+**P2** (polish — can trickle in).
+
+Items are starting points: each was flagged by a code-reading pass and
+should be re-confirmed against the current source before the fix is
+implemented, since some of the flagged sites touch hot paths where the
+"obvious" fix can regress numerical behaviour.
+
+### 7.1. Performance — hot-path callback & kernel cleanup — (S) · P1
+
+The IPOPT callbacks (`objective`, `gradient`, `constraints`,
+`jacobian`, `hessian`) and the kernels in `pympcc/_kernels.py` run
+many times per outer iteration; per-call allocations dominate
+small-problem solve time.
+
+Specific sites flagged:
+
+* `pympcc/_nlp.py:154-188, 281-301` — multiple `np.asarray(..., dtype=float)`
+  wraps inside Jacobian / gradient / constraints callbacks.  When the
+  user callable already returns a float64 ndarray these are pure copies.
+  Convert at NLP-construction time (one wrap), not per call.
+* `pympcc/_kernels.py:182-188, 218-231` — NumPy fallback for
+  `eval_weighted_union` / `eval_phi_eps_weighted_union` allocates
+  fresh boolean masks (`m1 = map1 >= 0`) on every call.  Precompute
+  the mask indices once when the union-map is built and store them on
+  the strategy.
+* `pympcc/strategies/ncp.py:175-189` — sparse Jacobian fallback
+  builds `(alpha[:, None] * JG + beta[:, None] * JH).ravel()` from
+  densified blocks, then `np.vstack`s rows into the full matrix.
+  Replace with a preallocated output buffer and in-place writes via
+  the existing `weighted_row_sum` / `scatter_add` kernels (these
+  already exist in `_kernels.py:190-206`).
+* `pympcc/strategies/scholtes.py:99-100` (and equivalent in
+  smoothing / lin-fukushima) — Hessian zero-padding via
+  `np.concatenate([..., np.zeros(p.n_comp)])` on every Hessian call.
+  Allocate the zero array once at strategy construction and reuse it
+  read-only.
+* `pympcc/_tnlp.py:341-344` — multiplier rescaling re-wraps
+  `comp_G_scale` / `comp_H_scale` with `np.asarray` per call; flatten
+  these once at `MPCCProblem.__post_init__` and store as ndarray.
+
+Acceptance: profile `examples/perf_profile.py` before and after on
+the MacMPEC suite; report per-call allocation reduction.
+
+### 7.2. Maintainability — refactors & deduplication
+
+#### 7.2.1. Strategy `__init__` deduplication — (M) · P1
+
+Five files repeat the same boilerplate:
+
+```python
+opts = {**_DEFAULTS, **kwargs}
+self._maybe_resolve_auto_epsilon_0(opts)
+self._validate_continuation_options(opts)
+self._init_safeguards(opts)
+self._init_cleanup(opts, user_kwargs=kwargs)
+```
+
+Sites: `pympcc/strategies/{scholtes,smoothing,lin_fukushima,slack}.py`
+and `_SmoothNCPBase` in `pympcc/strategies/ncp.py`.  Promote to a
+`BaseStrategy._init_continuation_options(user_kwargs, defaults)`
+helper; subclasses call it with their `_DEFAULTS` and only handle
+strategy-specific extras.  Saves ~200 lines and centralises the
+option-merge ordering so future flags propagate uniformly.
+
+#### 7.2.2. NCP variant deduplication — (M) · P1
+
+`pympcc/strategies/ncp.py` defines seven `_SmoothNCPBase` subclasses
+(`SmoothMin`, `ChenChenKanzow`, `KanzowSchwartz`, `ChenMangasarian`,
+`Billups`, `VeelkenUlbrichPow`, `VeelkenUlbrichSin`) whose
+`_phi(G,H,eps)` and `_phi_grad_coeffs(G,H,eps)` are mathematically
+distinct but structurally identical — same shape, same broadcast
+rules, same caller layout.  The Phase 1 NCP registry already lives
+in `pympcc/_reformulation.py`; the dedicated classes pre-date it and
+are now redundant duplication.
+
+Plan: keep `NCPReformulationStrategy` as the canonical entry point;
+demote the seven dedicated classes to thin shims that route through
+the registry.  Solver dispatch (`_STRATEGIES` dict in
+`pympcc/solver.py`) keeps the public string names.  Deletes ~400
+lines and the maintenance hazard of keeping per-class `_DEFAULTS`
+in sync with the registry.
+
+#### 7.2.3. God-module splits — (M) · P1
+
+Three modules are large enough that contributors have trouble
+locating logic:
+
+* `pympcc/problem.py` (1540 lines) — split derivative resolution,
+  sparsity utilities, and var-pair / box-bound normalisation into
+  `_problem_derivatives.py`, `_problem_sparsity.py`,
+  `_problem_reduction.py`.  Keep `MPCCProblem` dataclass + minimal
+  validation in `problem.py`.
+* `pympcc/strategies/_base.py` (1514 lines) — extract the
+  safeguard framework, the cleanup-polish phase, and the
+  ε-continuation harness into `_safeguards.py`, `_cleanup.py`,
+  `_continuation.py`.  Affects every strategy via inheritance, so
+  ship behind a noisy review.
+* `pympcc/_presolve.py` (1229 lines) — separate detection passes
+  (`_detect_pinned`, `_detect_dead`, `_detect_forced`,
+  `_detect_prefix_eq`) from the reduction-and-expand machinery and
+  from FBBT.  Suggested split: `_presolve_detect.py`,
+  `_presolve_reduce.py`, `_presolve_fbbt.py`, with `PresolveMap` and
+  the public `presolve()` entry point staying in `_presolve.py`.
+
+#### 7.2.4. Long-function refactors — (S each) · P2
+
+Over-100-line methods that should be broken up:
+
+* `pympcc/strategies/_base.py:_run_epsilon_continuation` (~290
+  lines) — extract per-safeguard checks (`_check_plateau`,
+  `_check_kkt_termination`, `_check_adaptive_eps`) into named
+  methods and sequence them explicitly.
+* `pympcc/strategies/_base.py:_build_nlp` (~120 lines, 9 optional
+  kwargs) — replace the kwarg list with an `NLPConfig` dataclass.
+* `pympcc/strategies/_base.py:_maybe_run_cleanup` (~115 lines) —
+  split predicate (`_should_run_cleanup`) from action
+  (`_run_cleanup_nlp`).
+* `pympcc/_presolve.py:_build_reduced` (~350 lines) — split per
+  reduction type or per Jacobian block.
+* `pympcc/_presolve.py:_fbbt` (~140 lines) — separate
+  forward-propagation, backward-propagation, and convergence test.
+* `pympcc/_diagnostics.py:classify_cq` (~100 lines) — split into
+  `_has_licq` / `_has_mfcq` / `_has_mpcc_mfcq`.
+* `pympcc/bilevel.py:from_lower_level` (~310 lines) and
+  `from_epec` (~270 lines) — extract KKT-builder /
+  variable-substitution helpers.
+* `pympcc/frontend/ampl.py:_read_optree` (~200 lines),
+  `from_nl` (~265 lines) — split header / body / derivative parsing
+  into a small parser class.
+
+#### 7.2.5. Centralised constants — (S) · P1
+
+Tolerances are scattered as magic numbers:
+
+| Value  | Sites (representative)                                              | Meaning                  |
+|--------|----------------------------------------------------------------------|--------------------------|
+| `1e-6` | `_diagnostics.py`, `_tnlp.py`, `solver.py:per_pair_status`           | biactive / pair tolerance|
+| `1e-8` | `solver.py`, `_diagnostics.py`, `_presolve.py`                       | default IPOPT tol        |
+| `1e-9` | `_presolve.py:_FBBT_TOL`, linearity probe                            | linearity / bound tol    |
+| `1e-10`| `_presolve.py`, `strategies/_base.py`                                | free-var gradient tol    |
+| `1e-12`| `models.py`, `_presolve.py:_DEAD_VAL_TOL`                            | sparsity / dead-pair tol |
+
+Move to `pympcc/_constants.py` with named symbols
+(`BIACTIVE_TOL`, `IPOPT_DEFAULT_TOL`, `FBBT_TOL`, `FREE_VAR_GRAD_TOL`,
+`SPARSITY_TOL`, `DEAD_VAL_TOL`).  Each strategy `_DEFAULTS` dict
+should also gain a one-line comment justifying the empirical default
+(currently undocumented values include `eps_hold_factor=3.0`,
+`comp_eps_ratio_theta=10.0`, `cleanup_obj_worsen_tol=1e-3`).
+
+#### 7.2.6. Multiplier-convention boundary — (S) · P2
+
+The codebase mixes IPOPT-convention (`mult_g`) and literature-convention
+(`μ_G = -λ_G`) multipliers in different spots: `pympcc/_tnlp.py:250-253`
+negates on extraction, `pympcc/sensitivity.py:33` documents that it
+returns raw IPOPT signs, `pympcc/_sosc.py` and `pympcc/result.py`
+each have their own conventions.  This is correct today (verified —
+the signs match where they meet) but fragile.  Introduce a
+`MultiplierConvention` enum + `to_ipopt() / to_literature()`
+converters and apply at module boundaries; remove inline negations.
+
+#### 7.2.7. Specific-exception sweep — (S) · P1
+
+Seven sites use bare `except Exception:`:
+
+```
+pympcc/_autoscale.py:96
+pympcc/_sosc.py:227
+pympcc/multistart.py:245, 273
+pympcc/_presolve.py:321, 542, 554
+```
+
+In each case the broad clause hides a real failure mode (callback
+raised, JAX trace failed, IPOPT restoration died, presolve probe
+divided-by-zero).  Replace with the narrowest tuple that still
+catches the expected failure, and emit a `logger.debug` (or
+`UserWarning` for user-visible degradations) with the original
+exception so debugging stops being silent.  Multistart in particular
+should record which start indices failed, with the exception type,
+on the result object.
+
+### 7.3. Correctness & robustness
+
+#### 7.3.1. Time-limit inside IPOPT solve — (S) · P1
+
+`pympcc/strategies/_base.py:1253-1255` checks `time_limit` between
+outer iterations only.  A single inner IPOPT solve with
+`max_iter=3000` can run for minutes past the user's budget.  Pass
+`max_cpu_time` (or `max_wall_time` on cyipopt ≥ 1.4) into the
+per-iteration IPOPT options, recomputed from the remaining budget on
+each iteration.  Pair with §6.3's "best feasible incumbent" guarantee:
+verify the returned `best_x` was successful (not just lowest comp
+residual on a failed iterate).
+
+#### 7.3.2. Multistart determinism & worker isolation — (S) · P1
+
+* `pympcc/multistart.py:73` mutates `problem.x0` in-place inside the
+  worker before calling `solve(problem, …)`.  Mutating a shared
+  object across spawn-mode workers is fine per-process but breaks
+  any caller that holds the same `MPCCProblem` reference for further
+  use (e.g., a caller doing multistart followed by sensitivity).
+  Pass `x0` as a kwarg, leave `problem` immutable.
+* No NumPy seed propagation: each worker has an independent default
+  RNG, so any randomised pass (autoscale, FD probe perturbation)
+  produces nondeterministic per-worker results.  Plumb
+  `seed_sequence.spawn(n_jobs)` into workers.
+
+#### 7.3.3. AMPL frontend numerical guards — (P2)
+
+`pympcc/frontend/ampl.py` op-tree gradient evaluation has
+unguarded divisions in several inverse-trig / log paths
+(`sqrt`, `log`, `log10`, `atan2`, `asin`, `acos`, `acosh`, `atanh`)
+around lines 848-908.  When the underlying value sits exactly on
+the domain boundary (e.g., `sqrt(0)`, `asin(±1)`) the local
+derivative is computed as `1/0`.  Add `np.fmax(denom, eps)` style
+guards or explicit branches for the boundary cases.  Low priority
+because well-formed AMPL usually keeps values inside the domain,
+but it produces silent NaN/Inf in IPOPT when the boundary is hit.
+
+#### 7.3.4. Cyipopt callback signature defensiveness — (S) · P2
+
+`pympcc/_nlp.py:154-167, 281-290` assumes the cyipopt
+`intermediate` callback signature includes `inf_pr` / `inf_du`.
+This holds for cyipopt ≥ 1.3 (which we already pin in
+`pyproject.toml`), so the gap is theoretical — but worth a
+defensive `*args, **kwargs` capture so a future cyipopt signature
+shift produces a clear error rather than a silent miswire.  Same
+treatment for `info_cu.get("mult_g")` access (currently indexed
+without a `None` guard).
+
+#### 7.3.5. Presolve composition tests — (S) · P1
+
+Each presolve pass has its own test file but there is no
+end-to-end test that exercises every order-of-composition
+(FBBT → pinned → empty → forced → prefix-eq) on a problem where
+each pass actually fires.  Add a synthetic problem to
+`tests/test_presolve.py` that triggers all five passes and
+verifies the round-trip `expand_result(reduced.solution) ==
+original.solution` in both `x` and `mult_g` blocks (modulo the
+documented info-loss on promoted/prefix-eq rows).
+
+#### 7.3.6. Edge-case dimensions — (S) · P2
+
+Sweep dimensions that current tests do not cover: `n_comp=0`
+(should reject with a clear error pointing users at a plain NLP
+solver), `n_eq=0`, `n_ineq=0`, `n=1`, fully-pinned bounds
+(`xl == xu`).  Add a parametrised test in
+`tests/test_robustness.py`.
+
+### 7.4. API surface, packaging & documentation
+
+#### 7.4.1. License & community files — (S) · P0
+
+`pyproject.toml:6` declares `license = { text = "MIT" }` but the
+repo has no `LICENSE` file.  Required for a public release on PyPI
+and for downstream users to redistribute.
+
+* Add `LICENSE` (MIT text, copyright "David Villacis").
+* Switch `pyproject.toml` to `license = { file = "LICENSE" }`.
+* Add `CONTRIBUTING.md` (dev setup, branch naming, testing,
+  pre-commit, PR checklist).
+* Add `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1 is a safe
+  default).
+* Add `AUTHORS.md` listing copyright holders.
+* Add a brief acknowledgement of cyipopt / IPOPT (EPL) in the
+  README — MIT and EPL co-distribute fine but the upstream credit
+  belongs in the docs.
+
+#### 7.4.2. Public API tidying — (S) · P1
+
+* `pympcc/frontend/__init__.py` re-exports modules (`ampl`,
+  `pyomo`) but not the headline functions.  Add `from .ampl import
+  from_nl` and `from .pyomo import from_pyomo, apply_solution` so
+  `pympcc.frontend.from_nl(...)` works and the README example
+  matches.
+* `pympcc/bilevel.py:from_lower_level`, `from_epec` and the
+  `Leader` / `LowerLevel` dataclasses are accessed today as
+  `pympcc.bilevel.from_lower_level(...)`.  The §5 examples use the
+  unprefixed name; re-export at top-level in `pympcc/__init__.py`.
+* `pympcc/__init__.py` re-exports private helpers from `_autodiff`,
+  `_autoscale`, `_diagnostics`, `_presolve`, `_sosc`, `_stationarity`,
+  `_tnlp`.  Decide for each whether it is part of the supported API
+  (and rename / move to a public submodule like `pympcc.diagnostics`)
+  or genuinely internal (and stop re-exporting it).
+
+#### 7.4.3. Typing tightening — (S) · P2
+
+`py.typed` is already shipped; remaining gaps:
+
+* Several public functions lack return-type annotations
+  (`pympcc/_autoscale.py:autoscale_comp_pairs`, `pympcc/_fd.py`
+  fd-helpers, `pympcc/bilevel.py:from_lower_level`,
+  `pympcc/_diagnostics.py:active_sets`, `pympcc/sensitivity.py`
+  helpers).
+* Strategy / backend names are stringly-typed (`str` parameters
+  accepting only a fixed set).  Promote to
+  `Literal["scholtes", "smoothing", …]` for IDE assistance and
+  static catches.
+* `pyproject.toml:111` uses `ignore_missing_imports = true`
+  globally; replace with module-scoped overrides for
+  cyipopt / scipy / pyomo / jax so user code still benefits from
+  strict typing.
+
+#### 7.4.4. Documentation gaps — (M) · P1
+
+* `README.md` mentions "six reformulation strategies"; the actual
+  count after the §3.5 NCP work is 6 canonical + 7 experimental.
+  Update wording and link to a strategy-selection table.
+* New `docs/user_guide/strategy_selection.md`: decision tree
+  (problem size / smoothness / MFCQ / warm-start use case) →
+  recommended strategy.
+* New `docs/user_guide/troubleshooting.md`: IPOPT divergence,
+  restoration failure, biactive pairs, when to use `tnlp_refine`,
+  what `diagnostics=True` reports mean.
+* `docs/user_guide/strategies.md` does not yet cover the NCP-function
+  variants (smooth_min, chen_chen_kanzow, kanzow_schwartz,
+  chen_mangasarian, billups, veelken_ulbrich_pow, veelken_ulbrich_sin)
+  shipped under §3.5.
+* `docs/user_guide/epec.md` does not exist; §5.5 v1 is shipped but
+  undocumented.
+* `examples/` covers `slack`, `sparse`, `jax` strategies but not
+  `smoothing`, `lin_fukushima`, `augmented_lagrangian`, the NCP
+  variants, the Pyomo frontend, presolve, or multistart.  Adding
+  one minimal example per shipped feature is mostly a copy-edit.
+* `examples/README.md` index file listing example → topic.
+
+#### 7.4.5. Packaging hygiene — (S) · P2
+
+* `cyipopt>=1.3` is in `dependencies` (correct) and *also*
+  duplicated in the optional `[ipopt]` extra
+  (`pyproject.toml:43`).  Drop the duplicate; the [ipopt] extra
+  is now empty and can be removed entirely (or left for
+  forward-compatibility if a future scipy-only build path lands).
+* Classifiers list 3.11 and 3.12; CI matrix should add 3.13.
+* `setup.py` carries the IPOPT custom-linear-solver Cython
+  extension build; pin its purpose in a comment and document
+  the env vars (`IPOPT_PREFIX`, `IPOPT_INCLUDE_DIR`,
+  `IPOPT_LIB_DIR`) in `docs/installation.md`.
+* Single source-of-truth for the version: read
+  `pympcc/__version__.py` from both `pympcc/__init__.py` and
+  `pyproject.toml` (via `dynamic = ["version"]` + hatchling).
+
+### 7.5. Tooling & CI — (S) · P2
+
+* `.pre-commit-config.yaml` does not exist; add ruff (lint +
+  format), mypy, trailing-whitespace, end-of-file-fixer.  Mirror
+  the hooks that CI already runs so contributors get fast local
+  feedback.
+* CI matrix: add Python 3.13.
+* Add a CI job that installs `pympcc[all]` (every optional extra
+  at once) and runs the full test suite; the current per-extra
+  jobs miss interaction bugs.
+* Test reorganisation (P2): move kernel / φ-function unit tests
+  under `tests/unit/`, full-solve tests under `tests/integration/`,
+  benchmark tests under `tests/bench/`.  This lets contributors
+  run the fast subset without IPOPT in the loop.
 
 ---
 

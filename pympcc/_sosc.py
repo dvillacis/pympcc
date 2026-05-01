@@ -24,6 +24,7 @@ The Lagrangian Hessian H is obtained from:
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import numpy as np
@@ -32,6 +33,8 @@ from ._diagnostics import _stack_active_gradient_matrix, active_sets
 from ._stationarity import _dense_jac
 from .problem import MPCCProblem
 from .result import MPCCResult
+
+_log = logging.getLogger(__name__)
 
 __all__ = ["sosc_check"]
 
@@ -224,7 +227,9 @@ def sosc_check(
     # ------------------------------------------------------------------ #
     try:
         H_mat = _build_hessian(x, p, lam_g, lam_h, lam_G, lam_H, _fd_h)
-    except Exception:
+    except (ArithmeticError, ValueError, TypeError, RuntimeError) as exc:
+        _log.debug("sosc: skipping (Hessian build failed), %s: %s",
+                   type(exc).__name__, exc)
         return {**_empty, "skipped_reason": _SKIPPED_NO_HESSIAN}
 
     # ------------------------------------------------------------------ #

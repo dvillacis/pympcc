@@ -1871,9 +1871,6 @@ docs = [
     { name = "sphinx-autodoc-typehints", version = "3.10.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "sphinx-copybutton" },
 ]
-ipopt = [
-    { name = "cyipopt" },
-]
 jax = [
     { name = "jax" },
 ]
@@ -1895,7 +1892,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cyipopt", marker = "extra == 'dev'", specifier = ">=1.3" },
-    { name = "cyipopt", marker = "extra == 'ipopt'", specifier = ">=1.3" },
     { name = "cython", marker = "extra == 'dev'", specifier = ">=3.2.4" },
     { name = "furo", marker = "extra == 'docs'", specifier = ">=2024.5" },
     { name = "jax", marker = "extra == 'jax'", specifier = ">=0.4" },
@@ -1913,7 +1909,7 @@ requires-dist = [
     { name = "sphinx-autodoc-typehints", marker = "extra == 'docs'", specifier = ">=2.0" },
     { name = "sphinx-copybutton", marker = "extra == 'docs'", specifier = ">=0.5" },
 ]
-provides-extras = ["dev", "ipopt", "numba", "jax", "scipy", "pyomo", "docs"]
+provides-extras = ["dev", "numba", "jax", "scipy", "pyomo", "docs"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "cython", specifier = ">=3.2.4" }]

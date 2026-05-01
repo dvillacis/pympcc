@@ -18,21 +18,26 @@ back to the original variable / comp-pair space before returning.
 """
 from __future__ import annotations
 
+import logging
 import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
 
+from ._constants import (
+    DEAD_VAL_TOL as _DEAD_VAL_TOL,
+    EMPTY_ROW_TOL as _EMPTY_ROW_TOL,
+    FBBT_TOL as _FBBT_TOL,
+    FREE_VAR_GRAD_TOL as _FREE_GRAD_TOL,
+    LINEARITY_TOL as _LINEARITY_TOL,
+)
 from .problem import MPCCProblem
 from .result import IterationInfo, MPCCResult
 
+_log = logging.getLogger(__name__)
+
 __all__ = ["PresolveMap", "presolve"]
-
-
-_DEAD_VAL_TOL = 1e-12
-_EMPTY_ROW_TOL = 1e-9    # constant rows must satisfy |g(x0)| ≤ this
-_FREE_GRAD_TOL = 1e-10   # |∂f/∂x_j| at probe points must be ≤ this to prune
 
 
 @dataclass
@@ -204,7 +209,6 @@ class PresolveMap:
 # Detection                                                                    #
 # --------------------------------------------------------------------------- #
 
-_FBBT_TOL  = 1e-9       # bounds must improve by more than this to count
 _FBBT_BUDGET = 50       # hard cap on outer FBBT sweeps
 
 
@@ -318,7 +322,9 @@ def _detect_empty_cols(
     try:
         g0 = np.asarray(p.gradient(x0), dtype=float)  # type: ignore[misc, operator]
         g1 = np.asarray(p.gradient(x1), dtype=float)  # type: ignore[misc, operator]
-    except Exception:
+    except (ArithmeticError, ValueError, TypeError, RuntimeError) as exc:
+        _log.debug("presolve: free-var probe failed, %s: %s",
+                   type(exc).__name__, exc)
         return np.empty(0, dtype=np.intp)
 
     free_mask = ((np.abs(g0[candidates]) <= _FREE_GRAD_TOL)
@@ -539,7 +545,9 @@ def _identify_linear_rows(
     try:
         vals0 = np.asarray(jac_callable(x0), dtype=float)
         g0    = np.asarray(g_callable(x0),   dtype=float)
-    except Exception:
+    except (ArithmeticError, ValueError, TypeError, RuntimeError) as exc:
+        _log.debug("presolve: linearity probe at x0 failed, %s: %s",
+                   type(exc).__name__, exc)
         return linear, A_rows, c
 
     # Bounded perturbation: ±10% of finite range, else ±1e-2.
@@ -551,7 +559,9 @@ def _identify_linear_rows(
 
     try:
         g1 = np.asarray(g_callable(x1), dtype=float)
-    except Exception:
+    except (ArithmeticError, ValueError, TypeError, RuntimeError) as exc:
+        _log.debug("presolve: linearity probe at x1 failed, %s: %s",
+                   type(exc).__name__, exc)
         return linear, A_rows, c
 
     # Predicted change per row using J(x0): Σ_j A[i,j] · δ_j.
@@ -560,7 +570,7 @@ def _identify_linear_rows(
     actual = g1 - g0
     scale = 1.0 + np.maximum(np.abs(g0), np.abs(g1))
     err = np.abs(actual - pred)
-    linear = err < (1e-9 * scale)
+    linear = err < (_LINEARITY_TOL * scale)
 
     # For linear rows, build A and c from x0-evaluation.
     for i in np.where(linear)[0]:
@@ -1197,6 +1207,14 @@ def presolve(problem: MPCCProblem) -> tuple[MPCCProblem, PresolveMap]:
         pinned_idx,
         assume_unique=True,
     )
+    # cyipopt requires n >= 1.  When *every* variable is pinned, fall
+    # back to identity so the strategy / NLP layer evaluates the
+    # original problem at its single feasible point (where IPOPT
+    # terminates after one iteration); avoids constructing an
+    # n_red == 0 NLP that cyipopt rejects.
+    if keep_vars.size == 0:
+        return problem, _identity_map(problem)
+
     pmap = PresolveMap(
         keep_vars=keep_vars,
         fixed_vars=pinned_idx.astype(np.intp),

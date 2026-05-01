@@ -1,6 +1,6 @@
 """Smooth NCP-function reformulation strategies for MPCC.
 
-Three strategy classes that share the ε-continuation harness from
+Strategy classes that share the ε-continuation harness from
 :mod:`pympcc.strategies.smoothing` but differ in the NCP function used to
 replace complementarity:
 
@@ -11,8 +11,16 @@ replace complementarity:
 * :class:`KanzowSchwartzStrategy` — one-parameter family interpolating
   between FB (λ=0) and a modified FB:
   ``φ_{λ,ε}(G,H) = G + H − √(G² + H² + 2λGH + ε²)``,  λ ∈ [0, 1)
+* :class:`ChenMangasarianStrategy` — α-asymmetric FB↔min interpolation:
+  ``φ_{α,ε}(G,H) = (G + H) − √(G² + H² − 2αGH + ε²)``,  α ∈ [0, 1]
+* :class:`BillupsStrategy` — Fischer-Burmeister minus a positive-part penalty:
+  ``φ_{γ,ε}(G,H) = φ_FB,ε(G,H) − γ·G₊·H₊``
+* :class:`VeelkenUlbrichPowStrategy` — smooth-min via piecewise-polynomial
+  C² smoothing of ``|·|``.
+* :class:`VeelkenUlbrichSinStrategy` — smooth-min via arctan-based C^∞
+  smoothing of ``|·|``.
 
-All three follow the same constraint layout as :class:`SmoothingStrategy`::
+All follow the same constraint layout as :class:`SmoothingStrategy`::
 
     [g(x) ≤ 0,  h(x) = 0,  G(x) ≥ 0,  H(x) ≥ 0,  φ_ε(G,H) = 0]
 
@@ -184,18 +192,22 @@ class _SmoothNCPBase(BaseStrategy, abc.ABC):
 
         def make_iteration(eps, x, last_info, n_ipopt_iter, iter_time):
             G, H = self._eval_comp_values(x, cache)
-            _off = n_g + n_h
-            _lam_G   = last_info["mult_g"][_off           : _off + n_c]
-            _lam_H   = last_info["mult_g"][_off + n_c     : _off + 2 * n_c]
-            _lam_phi = last_info["mult_g"][_off + 2 * n_c : _off + 3 * n_c]
-            _alpha, _beta = self._phi_grad_coeffs(G, H, eps)
-            _kkt = self._compute_kkt_iter(
-                x, last_info["mult_g"],
-                mpcc_mult_G=_lam_G + _alpha * _lam_phi,
-                mpcc_mult_H=_lam_H + _beta  * _lam_phi,
-                mult_x_L=last_info.get("mult_x_L"),
-                mult_x_U=last_info.get("mult_x_U"),
-            )
+            _mg = last_info.get("mult_g")
+            if _mg is not None and len(_mg):
+                _off = n_g + n_h
+                _lam_G   = _mg[_off           : _off + n_c]
+                _lam_H   = _mg[_off + n_c     : _off + 2 * n_c]
+                _lam_phi = _mg[_off + 2 * n_c : _off + 3 * n_c]
+                _alpha, _beta = self._phi_grad_coeffs(G, H, eps)
+                _kkt = self._compute_kkt_iter(
+                    x, _mg,
+                    mpcc_mult_G=_lam_G + _alpha * _lam_phi,
+                    mpcc_mult_H=_lam_H + _beta  * _lam_phi,
+                    mult_x_L=last_info.get("mult_x_L"),
+                    mult_x_U=last_info.get("mult_x_U"),
+                )
+            else:
+                _kkt = None
             return IterationInfo(
                 epsilon=eps,
                 x=x.copy(),
@@ -233,19 +245,24 @@ class _SmoothNCPBase(BaseStrategy, abc.ABC):
         )
         result.stationarity = classify_stationarity(result, self.problem)
 
-        _off = n_g + n_h
-        lam_G   = last_info["mult_g"][_off           : _off + n_c]
-        lam_H   = last_info["mult_g"][_off + n_c     : _off + 2 * n_c]
-        lam_phi = last_info["mult_g"][_off + 2 * n_c : _off + 3 * n_c]
-        mpcc_mult_G = lam_G + alpha * lam_phi
-        mpcc_mult_H = lam_H + beta  * lam_phi
-        result.kkt_residual = compute_kkt_residual(
-            result, self.problem,
-            mpcc_mult_G=mpcc_mult_G,
-            mpcc_mult_H=mpcc_mult_H,
-            mult_x_L=last_info.get("mult_x_L"),
-            mult_x_U=last_info.get("mult_x_U"),
-        )
+        mg = last_info.get("mult_g")
+        if mg is not None and len(mg):
+            _off = n_g + n_h
+            lam_G   = mg[_off           : _off + n_c]
+            lam_H   = mg[_off + n_c     : _off + 2 * n_c]
+            lam_phi = mg[_off + 2 * n_c : _off + 3 * n_c]
+            mpcc_mult_G = lam_G + alpha * lam_phi
+            mpcc_mult_H = lam_H + beta  * lam_phi
+            result.kkt_residual = compute_kkt_residual(
+                result, self.problem,
+                mpcc_mult_G=mpcc_mult_G,
+                mpcc_mult_H=mpcc_mult_H,
+                mult_x_L=last_info.get("mult_x_L"),
+                mult_x_U=last_info.get("mult_x_U"),
+            )
+        else:
+            mpcc_mult_G = None
+            mpcc_mult_H = None
         result = self._maybe_run_cleanup(
             result, last_info, x, mpcc_mult_G, mpcc_mult_H,
         )
@@ -390,3 +407,239 @@ class KanzowSchwartzStrategy(_SmoothNCPBase):
         alpha = 1.0 - (G + lam * H) / sq
         beta  = 1.0 - (H + lam * G) / sq
         return alpha, beta
+
+
+# --------------------------------------------------------------------------- #
+# Chen-Mangasarian (CM)                                                        #
+# --------------------------------------------------------------------------- #
+
+class ChenMangasarianStrategy(_SmoothNCPBase):
+    r"""Chen-Mangasarian asymmetric NCP-function strategy.
+
+    Replaces the complementarity conditions with the one-parameter family
+
+    .. math::
+
+        \varphi_{\alpha,\varepsilon}(G, H)
+            = (G + H) - \sqrt{G^2 + H^2 - 2\alpha\,G\,H + \varepsilon^2} = 0,
+            \qquad \alpha \in [0, 1].
+
+    The radicand :math:`G^2 + H^2 - 2\alpha G H` is non-negative for any
+    real ``G, H`` when ``α ∈ [0, 1]`` (it equals
+    ``(1-α)(G²+H²) + α(G-H)²``).  Limits:
+
+    * ``α = 0`` recovers smoothed Fischer-Burmeister.
+    * ``α = 1`` recovers ``(G+H) − |G-H| = 2·min(G, H)`` (the min-NCP).
+
+    For a general ``α`` the function is a smooth FB↔min interpolation,
+    matching NLPEC's ``CMxf`` / ``CMfx`` rows.
+
+    Parameters (passed as **strategy_options** to :class:`MPCCSolver`)
+    ------------------------------------------------------------------
+    alpha : float
+        Asymmetry parameter ``α ∈ [0, 1]`` (default 0.5).
+    epsilon_0, reduction, max_iter, epsilon_min : same as SmoothingStrategy.
+    """
+
+    name = "chen_mangasarian"
+    _VALID_OPTIONS: frozenset = frozenset({*_DEFAULTS, "alpha"})
+
+    def __init__(self, problem, ipopt_options: dict, **kwargs) -> None:
+        alpha = float(kwargs.pop("alpha", 0.5))
+        if not (0.0 <= alpha <= 1.0):
+            raise ValueError(f"ChenMangasarian: alpha must be in [0, 1], got {alpha}")
+        super().__init__(problem, ipopt_options, **kwargs)
+        self._alpha = alpha
+
+    def _phi(self, G: np.ndarray, H: np.ndarray, eps: float) -> np.ndarray:
+        a = self._alpha
+        r = np.sqrt(G ** 2 + H ** 2 - 2.0 * a * G * H + eps ** 2)
+        return G + H - r
+
+    def _phi_grad_coeffs(
+        self,
+        G: np.ndarray,
+        H: np.ndarray,
+        eps: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        a = self._alpha
+        r = np.sqrt(G ** 2 + H ** 2 - 2.0 * a * G * H + eps ** 2)
+        alpha_c = 1.0 - (G - a * H) / r
+        beta_c  = 1.0 - (H - a * G) / r
+        return alpha_c, beta_c
+
+
+# --------------------------------------------------------------------------- #
+# Billups composite                                                            #
+# --------------------------------------------------------------------------- #
+
+class BillupsStrategy(_SmoothNCPBase):
+    r"""Billups composite NCP-function strategy.
+
+    Composes smoothed Fischer-Burmeister with a positive-part penalty term::
+
+        φ_{γ,ε}(G, H) = (G + H) − √(G² + H² + ε²) − γ · G₊_ε · H₊_ε
+
+    where ``t₊_ε = ½(t + √(t² + ε²))`` is the standard CHKS smoothed
+    positive-part.  At ``γ = 0`` this reduces to FB; for ``γ > 0`` the extra
+    penalty drives feasible iterates harder onto the complementary cone.
+    Matches NLPEC's ``Bill`` / ``fBill`` rows.
+
+    Parameters (passed as **strategy_options** to :class:`MPCCSolver`)
+    ------------------------------------------------------------------
+    gamma : float
+        Penalty weight ``γ ≥ 0`` (default ``0.1``).  Larger values pull
+        iterates more aggressively toward the complementary cone but can
+        introduce spurious infeasibility for the smoothed φ at finite
+        ``ε``; ``0.1`` is a safe default that keeps the FB term in
+        control.
+    epsilon_0, reduction, max_iter, epsilon_min : same as SmoothingStrategy.
+    """
+
+    name = "billups"
+    _VALID_OPTIONS: frozenset = frozenset({*_DEFAULTS, "gamma"})
+
+    def __init__(self, problem, ipopt_options: dict, **kwargs) -> None:
+        gamma = float(kwargs.pop("gamma", 0.1))
+        if gamma < 0.0:
+            raise ValueError(f"Billups: gamma must be ≥ 0, got {gamma}")
+        super().__init__(problem, ipopt_options, **kwargs)
+        self._gamma = gamma
+
+    def _phi(self, G: np.ndarray, H: np.ndarray, eps: float) -> np.ndarray:
+        g = self._gamma
+        rg = np.sqrt(G ** 2 + eps ** 2)
+        rh = np.sqrt(H ** 2 + eps ** 2)
+        Gp = 0.5 * (G + rg)
+        Hp = 0.5 * (H + rh)
+        r = np.sqrt(G ** 2 + H ** 2 + eps ** 2)
+        return G + H - r - g * Gp * Hp
+
+    def _phi_grad_coeffs(
+        self,
+        G: np.ndarray,
+        H: np.ndarray,
+        eps: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        g = self._gamma
+        rg = np.sqrt(G ** 2 + eps ** 2)
+        rh = np.sqrt(H ** 2 + eps ** 2)
+        Gp = 0.5 * (G + rg)
+        Hp = 0.5 * (H + rh)
+        dGp = 0.5 * (1.0 + G / rg)
+        dHp = 0.5 * (1.0 + H / rh)
+        r = np.sqrt(G ** 2 + H ** 2 + eps ** 2)
+        alpha = 1.0 - G / r - g * dGp * Hp
+        beta  = 1.0 - H / r - g * Gp * dHp
+        return alpha, beta
+
+
+# --------------------------------------------------------------------------- #
+# Veelken-Ulbrich smoothings of the min-NCP                                    #
+# --------------------------------------------------------------------------- #
+
+def _smooth_min_phi_from_sigma(G, H, sigma_vals):
+    """Common smooth-min body: ``φ = ½(G + H − σ_ε(G − H))``."""
+    return 0.5 * (G + H - sigma_vals)
+
+
+def _smooth_min_grad_from_sigma_prime(sigma_prime):
+    """Common smooth-min gradient: ``α = ½(1 − σ'(G−H))``,
+    ``β = ½(1 + σ'(G−H))``."""
+    return 0.5 * (1.0 - sigma_prime), 0.5 * (1.0 + sigma_prime)
+
+
+class VeelkenUlbrichPowStrategy(_SmoothNCPBase):
+    r"""Smooth-min strategy with Veelken-Ulbrich piecewise-polynomial smoothing.
+
+    Replaces complementarity with::
+
+        φ_ε(G, H) = ½(G + H − σ_ε^pow(G − H)) = 0,
+
+    where ``σ_ε^pow`` is the unique even polynomial of degree 4 that matches
+    ``|t|`` and its first two derivatives at ``|t| = ε``::
+
+        σ_ε^pow(t) = |t|                                          if |t| ≥ ε,
+                   = 3ε/8 + (3/(4ε))·t² − (1/(8ε³))·t⁴            if |t| < ε.
+
+    This is C² globally (matching σ'' = 0 on both sides at ``|t| = ε``)
+    and approaches ``|·|`` from above as ``ε → 0``.  Retains MFCQ-friendly
+    behaviour near degeneracy because the smoothing is strict at the
+    transition.  Matches NLPEC's ``fVUpow``.
+
+    Parameters (passed as **strategy_options** to :class:`MPCCSolver`)
+    ------------------------------------------------------------------
+    epsilon_0, reduction, max_iter, epsilon_min : same as SmoothingStrategy.
+    """
+
+    name = "veelken_ulbrich_pow"
+
+    @staticmethod
+    def _sigma(t: np.ndarray, eps: float) -> np.ndarray:
+        abst = np.abs(t)
+        inner = 3.0 * eps / 8.0 + (3.0 / (4.0 * eps)) * t * t \
+            - (1.0 / (8.0 * eps ** 3)) * t ** 4
+        return np.where(abst >= eps, abst, inner)
+
+    @staticmethod
+    def _sigma_prime(t: np.ndarray, eps: float) -> np.ndarray:
+        abst = np.abs(t)
+        inner = (3.0 / (2.0 * eps)) * t - (1.0 / (2.0 * eps ** 3)) * t ** 3
+        return np.where(abst >= eps, np.sign(t), inner)
+
+    def _phi(self, G: np.ndarray, H: np.ndarray, eps: float) -> np.ndarray:
+        return _smooth_min_phi_from_sigma(G, H, self._sigma(G - H, eps))
+
+    def _phi_grad_coeffs(
+        self,
+        G: np.ndarray,
+        H: np.ndarray,
+        eps: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        return _smooth_min_grad_from_sigma_prime(self._sigma_prime(G - H, eps))
+
+
+class VeelkenUlbrichSinStrategy(_SmoothNCPBase):
+    r"""Smooth-min strategy with Veelken-Ulbrich arctan-based smoothing.
+
+    Replaces complementarity with::
+
+        φ_ε(G, H) = ½(G + H − σ_ε^sin(G − H)) = 0,
+
+    where ``σ_ε^sin`` is the C^∞ approximation of ``|·|``::
+
+        σ_ε^sin(t) = (2t/π) · arctan(π t / (2ε)).
+
+    Asymptotics: ``σ_ε^sin(t) → |t|`` as ``ε → 0`` (since
+    ``(2/π)·arctan(πt/(2ε)) → sign(t)``), and ``σ_ε^sin(0) = 0`` exactly
+    so the smoothed-min vanishes at ``G = H = 0``.  The function and all
+    derivatives are smooth, which can help second-order solvers.  Matches
+    NLPEC's ``fVUsin`` in spirit; the precise transcendental form is
+    self-contained (no piecewise transition).
+
+    Parameters (passed as **strategy_options** to :class:`MPCCSolver`)
+    ------------------------------------------------------------------
+    epsilon_0, reduction, max_iter, epsilon_min : same as SmoothingStrategy.
+    """
+
+    name = "veelken_ulbrich_sin"
+
+    @staticmethod
+    def _sigma(t: np.ndarray, eps: float) -> np.ndarray:
+        return (2.0 * t / np.pi) * np.arctan(np.pi * t / (2.0 * eps))
+
+    @staticmethod
+    def _sigma_prime(t: np.ndarray, eps: float) -> np.ndarray:
+        u = np.pi * t / (2.0 * eps)
+        return (2.0 / np.pi) * np.arctan(u) + t / (eps * (1.0 + u * u))
+
+    def _phi(self, G: np.ndarray, H: np.ndarray, eps: float) -> np.ndarray:
+        return _smooth_min_phi_from_sigma(G, H, self._sigma(G - H, eps))
+
+    def _phi_grad_coeffs(
+        self,
+        G: np.ndarray,
+        H: np.ndarray,
+        eps: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        return _smooth_min_grad_from_sigma_prime(self._sigma_prime(G - H, eps))

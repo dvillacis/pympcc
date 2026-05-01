@@ -20,6 +20,7 @@ from typing import Optional
 
 import numpy as np
 
+from ._constants import ZERO_NORM_TOL as _ZERO_NORM_TOL
 from ._stationarity import _dense_jac
 from .problem import MPCCProblem
 from .result import MPCCResult
@@ -33,9 +34,6 @@ __all__ = [
     "initial_point_statistics",
     "degeneracy_report",
 ]
-
-
-_ZERO_NORM_TOL = 1e-10
 
 
 def active_sets(

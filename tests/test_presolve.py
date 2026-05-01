@@ -212,6 +212,176 @@ class TestCombined:
 
 
 # ======================================================================= #
+# End-to-end composition (§7.3.5)                                           #
+# ======================================================================= #
+
+class TestComposition:
+    """Verify multiple presolve passes fire together and the round-trip
+    through ``solve(presolve=True)`` matches ``solve(presolve=False)`` in
+    both ``x`` and ``mult_g`` blocks (modulo documented info loss on
+    promoted/prefix-eq rows)."""
+
+    def _build_multi_pass_problem(self):
+        # Synthetic MPCC engineered so several presolve passes all fire:
+        #
+        #   x[0] : pinned via xl[0] == xu[0] == 0.5     (pinned-var, A1)
+        #   x[2] : FBBT tightens xu[2] from 1.0 to 0.8  (FBBT, A2)
+        #          via the linear ineq x[2] - 0.8 ≤ 0
+        #   ineq[1] : structurally empty row, feasible  (empty-row, A4)
+        #
+        #   pair 0 : G_0 = 5.0 (const, empty G-row)     (dead, B1)
+        #   pair 1 : H_1 = 0.0 (const, empty H-row)     (forced, B2)
+        #            G_1 = x[1]+2 ≥ 1 over [-1,1] gets promoted to ineq.
+        #   pair 2 : G_2 = x[3] + 1 linear ≥ 1 over [0,2] (prefix-eq, B3)
+        #            so H_2 = x[1]-x[3] = 0 is enforced as eq.
+        #   pair 3 : G_3 = x[1]+3, H_3 = x[2]-0.5       (survives)
+        n, n_comp, n_ineq = 4, 4, 2
+        xl = np.array([0.5, -1.0, 0.5, 0.0])
+        xu = np.array([0.5,  1.0, 1.0, 2.0])
+        x0 = np.array([0.5, 0.0, 0.6, 1.0])
+
+        # Linear ineq: row 0 nonempty (x[2] - 0.8 ≤ 0); row 1 empty (0.0).
+        ineq_sp = (np.array([0], dtype=np.intp), np.array([2], dtype=np.intp))
+
+        def ineq(x):
+            return np.array([x[2] - 0.8, 0.0])
+
+        def ineq_jac(x):
+            return np.array([1.0])  # COO values for row-0 only
+
+        # G: rows 1, 2, 3 nonempty (pair 0 dead).
+        sG = (np.array([1, 2, 3], dtype=np.intp),
+              np.array([1, 3, 1], dtype=np.intp))
+
+        def comp_G(x):
+            return np.array([5.0,           # dead
+                             x[1] + 2.0,    # forced (gets promoted)
+                             x[3] + 1.0,    # prefix-eq
+                             x[1]])         # normal — spans 0 over [-1,1]
+
+        def comp_G_jac(x):
+            return np.array([1.0, 1.0, 1.0])
+
+        # H: rows 0, 2, 3 nonempty (pair 1 forced via empty H-row).
+        # Pair 2's H is x[1] - x[3] which is structurally two-column.
+        sH = (np.array([0, 2, 2, 3], dtype=np.intp),
+              np.array([3, 1, 3, 2], dtype=np.intp))
+
+        def comp_H(x):
+            return np.array([x[3],          # dead pair (H = 0 at x[3]=0)
+                             0.0,            # forced: structurally zero
+                             x[1] - x[3],    # prefix-eq target (drives to 0)
+                             x[2] - 0.5])    # normal
+
+        def comp_H_jac(x):
+            # Same order as sH: (0,3), (2,1), (2,3), (3,2)
+            return np.array([1.0, 1.0, -1.0, 1.0])
+
+        return pympcc.MPCCProblem(
+            n=n, n_comp=n_comp, n_ineq=n_ineq,
+            x0=x0, xl=xl, xu=xu,
+            objective=lambda x: float(
+                (x[0] - 0.5) ** 2 + (x[1] - 0.4) ** 2
+                + (x[2] - 0.5) ** 2 + (x[3]) ** 2
+            ),
+            gradient=lambda x: np.array([
+                2.0 * (x[0] - 0.5),
+                2.0 * (x[1] - 0.4),
+                2.0 * (x[2] - 0.5),
+                2.0 * x[3],
+            ]),
+            ineq_constraints=ineq,
+            ineq_jacobian=ineq_jac,
+            ineq_jacobian_sparsity=ineq_sp,
+            comp_G=comp_G,
+            comp_G_jacobian=comp_G_jac,
+            comp_G_jacobian_sparsity=sG,
+            comp_H=comp_H,
+            comp_H_jacobian=comp_H_jac,
+            comp_H_jacobian_sparsity=sH,
+        ), n, n_comp
+
+    def test_multiple_passes_fire(self):
+        """The constructed problem triggers multiple passes; presolve is
+        not the identity map."""
+        p, n, n_comp = self._build_multi_pass_problem()
+        reduced, pmap = presolve(p)
+        assert not pmap.is_identity, (
+            "expected at least one presolve pass to fire on this problem"
+        )
+        # Pinned-var pass (A1): x[0] pinned by bounds.
+        assert 0 in pmap.fixed_vars.tolist(), (
+            f"x[0] should be pinned; fixed_vars={pmap.fixed_vars.tolist()}"
+        )
+        # Dead-pair pass (B1): pair 0 dropped (G_0 = 5.0 const).
+        assert 0 not in pmap.keep_comp.tolist(), (
+            f"pair 0 should be dead; keep_comp={pmap.keep_comp.tolist()}"
+        )
+        # Forced pass (B2): pair 1 promoted via empty H-row (G is the
+        # surviving side, hence ``promote_G``).
+        assert 1 in pmap.promote_G.tolist(), (
+            f"pair 1 should be in promote_G (H_1 ≡ 0); "
+            f"promote_G={pmap.promote_G.tolist()}"
+        )
+        # Prefix-eq pass (B3): pair 2 dropped, H_2 forced to equality.
+        assert 2 in pmap.prefix_H_eq.tolist(), (
+            f"pair 2 should be in prefix_H_eq; "
+            f"prefix_H_eq={pmap.prefix_H_eq.tolist()}"
+        )
+        # Pair 3 is the only one still in keep_comp.
+        assert pmap.keep_comp.tolist() == [3]
+
+    def test_round_trip_feasibility_for_surviving_constraints(self):
+        """The expanded ``result`` is feasible w.r.t. bounds, surviving
+        linear inequalities, and surviving comp pairs.  Dropped pairs are
+        intentionally not enforced (that is the presolve contract — see
+        ROADMAP §1 B1/B2/B3 docs on info loss); they are listed but only
+        the surviving pairs are checked here."""
+        p, n, n_comp = self._build_multi_pass_problem()
+        _, pmap = presolve(p)
+        result = pympcc.solve(p, strategy="scholtes",
+                              ipopt_options={"max_iter": 200, "tol": 1e-8},
+                              presolve=True)
+        assert result.success
+        x = result.x
+        # Bounds.
+        assert np.all(x >= np.asarray(p.xl) - 1e-7)
+        assert np.all(x <= np.asarray(p.xu) + 1e-7)
+        # Surviving inequality rows only (empty-row pass dropped the rest).
+        g_full = np.asarray(p.ineq_constraints(x))
+        kept_ineq = pmap.keep_ineq if pmap.keep_ineq is not None else slice(None)
+        assert np.all(g_full[kept_ineq] <= 1e-6), (
+            f"surviving ineq violated: {g_full[kept_ineq]}"
+        )
+        # Complementarity holds for surviving pairs only.
+        G_full = np.asarray(p.comp_G(x))
+        H_full = np.asarray(p.comp_H(x))
+        keep = pmap.keep_comp
+        assert np.all(G_full[keep] >= -1e-6), f"G violated: {G_full[keep]}"
+        assert np.all(H_full[keep] >= -1e-6), f"H violated: {H_full[keep]}"
+        comp_resid = float(np.max(np.abs(G_full[keep] * H_full[keep])))
+        assert comp_resid < 1e-4, (
+            f"surviving complementarity violated: max |G*H| = {comp_resid}"
+        )
+
+    def test_round_trip_shapes_match_original(self):
+        """Result is reported in original problem space regardless of
+        which passes fired during presolve."""
+        p, n, n_comp = self._build_multi_pass_problem()
+        result = pympcc.solve(p, strategy="scholtes",
+                              ipopt_options={"max_iter": 200, "tol": 1e-8},
+                              presolve=True)
+        assert result.success
+        assert result.x.shape == (n,)
+        assert result.G.shape == (n_comp,)
+        assert result.H.shape == (n_comp,)
+        # Pinned x[0] reported at its fixed value.
+        assert result.x[0] == pytest.approx(0.5, abs=1e-9)
+        # Dead pair G_0 reported at its constant value.
+        assert result.G[0] == pytest.approx(5.0, abs=1e-9)
+
+
+# ======================================================================= #
 # History expansion                                                         #
 # ======================================================================= #
 

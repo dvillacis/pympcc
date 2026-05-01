@@ -30,6 +30,8 @@ from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
+from ._constants import BIACTIVE_TOL_FLOOR
+
 if TYPE_CHECKING:
     from .problem import MPCCProblem
     from .result import MPCCResult
@@ -261,7 +263,7 @@ def run_tnlp_refinement(
     # Skip the TNLP when more than _BIACTIVE_THRESHOLD of pairs are biactive.
     _comp = float(np.max(np.abs(G_arr * H_arr))) if G_arr.size else 0.0
     # Upward slack matches _attach_per_pair_status so classification is consistent.
-    _bi_tol = max(np.sqrt(_comp) * (1.0 + 1e-6), 1e-6)
+    _bi_tol = max(np.sqrt(_comp) * (1.0 + BIACTIVE_TOL_FLOOR), BIACTIVE_TOL_FLOOR)
     _n_biactive = int(np.sum((G_arr <= _bi_tol) & (H_arr <= _bi_tol)))
     _biactive_frac = _n_biactive / max(p.n_comp, 1)
     _BIACTIVE_THRESHOLD = 0.10

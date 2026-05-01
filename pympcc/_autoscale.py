@@ -17,9 +17,13 @@ to recover original-space duals.
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 __all__ = ["autoscale_comp_pairs"]
+
+_log = logging.getLogger(__name__)
 
 
 def autoscale_comp_pairs(
@@ -93,9 +97,11 @@ def autoscale_comp_pairs(
         try:
             G = np.asarray(problem.comp_G(x), dtype=float)
             H = np.asarray(problem.comp_H(x), dtype=float)
-        except Exception:                                    # pragma: no cover
+        except (ArithmeticError, ValueError, TypeError, RuntimeError) as exc:
             # Skip points where the user's callable can't be evaluated
-            # (NaN/Inf branches, domain errors).
+            # (NaN/Inf branches, domain errors, shape mismatches).
+            _log.debug("autoscale: skipping probe point, %s: %s",
+                       type(exc).__name__, exc)
             continue
         if np.all(np.isfinite(G)) and np.all(np.isfinite(H)):
             G_samples.append(np.abs(G))

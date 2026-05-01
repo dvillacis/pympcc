@@ -142,6 +142,9 @@ class DirectStrategy(BaseStrategy):
             warm = dict(self._initial_warm_dual)
             self._initial_warm_dual = None
             nlp.add_option("warm_start_init_point", "yes")
+        # Honour ``time_limit`` by capping IPOPT's CPU time for the solve.
+        if self.time_limit is not None and self.time_limit > 0:
+            nlp.add_option("max_cpu_time", float(self.time_limit))
         x, info, solve_time = self._timed_solve(nlp, p.x0, warm)
 
         G, H = self._eval_comp_values(x, cache)

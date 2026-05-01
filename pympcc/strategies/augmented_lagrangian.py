@@ -371,6 +371,14 @@ class AugmentedLagrangianStrategy(BaseStrategy):
             )
             _tol_user = self.ipopt_options.get("tol", 1e-8)
             nlp.add_option("tol", max(_tol_user, min(_comp_for_tol * 1e-2, 1e-6)))
+            # Bound the inner IPOPT solve by the remaining outer budget so a
+            # single hard inner NLP cannot run past ``self.time_limit``.
+            if self.time_limit is not None:
+                _remaining = self.time_limit - (_time.perf_counter() - wall_t0)
+                if _remaining <= 0:
+                    self._time_limit_hit = True
+                    break
+                nlp.add_option("max_cpu_time", float(_remaining))
             x, last_info, iter_time = self._timed_solve(nlp, x, warm_dual)
             total_time += iter_time
             if self.dual_warmstart:

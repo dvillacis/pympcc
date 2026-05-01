@@ -15,8 +15,8 @@ sudo apt-get install coinor-libipopt-dev
 ## Package install
 
 ```bash
-pip install "pympcc[ipopt]"          # default IPOPT backend
-pip install "pympcc[scipy]"          # SciPy backend only (no IPOPT)
+pip install pympcc                   # default — pulls cyipopt for the IPOPT backend
+pip install "pympcc[scipy]"          # also include the SciPy backend
 pip install "pympcc[dev]"            # adds pytest / coverage / lint
 pip install "pympcc[numba]"          # Numba JIT kernels for hot paths
 pip install "pympcc[jax]"            # JAX-backed derivatives & solve_jax

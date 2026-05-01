@@ -384,9 +384,16 @@ class SlackStrategy(BaseStrategy):
         def obj_lifted(z: np.ndarray) -> float:
             return float(p.objective(z[:n]))
 
+        # Pre-allocated lifted-gradient buffer (zeros never overwritten —
+        # ∂f/∂s_G = ∂f/∂s_H = 0 by construction in the lifted NLP).
+        # Same shared-buffer convention as `_jac_buf` above.
+        _grad_buf = np.zeros(n + 2 * n_c)
+
         def grad_lifted(z: np.ndarray) -> np.ndarray:
-            g = np.asarray(p.gradient(z[:n]), dtype=float)  # type: ignore[misc, operator]
-            return np.concatenate([g, np.zeros(2 * n_c)])
+            _grad_buf[:n] = np.asarray(
+                p.gradient(z[:n]), dtype=float
+            )  # type: ignore[misc, operator]
+            return _grad_buf
 
         hess_fn, hess_sparsity = None, None
         if getattr(self.problem, "lagrangian_hessian_slack", None) is not None:
@@ -414,14 +421,18 @@ class SlackStrategy(BaseStrategy):
             s_H = z[col_sH:]
             comp_residual = float(np.max(np.abs(s_G * s_H)))
             comp_residual_mean = float(np.mean(np.abs(s_G * s_H)))
-            _off = p.n_ineq + p.n_eq
-            _kkt = self._compute_kkt_iter(
-                x, last_info["mult_g"],
-                mpcc_mult_G=last_info["mult_g"][_off       : _off + n_c],
-                mpcc_mult_H=last_info["mult_g"][_off + n_c : _off + 2 * n_c],
-                mult_x_L=last_info.get("mult_x_L"),
-                mult_x_U=last_info.get("mult_x_U"),
-            )
+            _mg = last_info.get("mult_g")
+            if _mg is not None and len(_mg):
+                _off = p.n_ineq + p.n_eq
+                _kkt = self._compute_kkt_iter(
+                    x, _mg,
+                    mpcc_mult_G=_mg[_off       : _off + n_c],
+                    mpcc_mult_H=_mg[_off + n_c : _off + 2 * n_c],
+                    mult_x_L=last_info.get("mult_x_L"),
+                    mult_x_U=last_info.get("mult_x_U"),
+                )
+            else:
+                _kkt = None
             return IterationInfo(
                 epsilon=eps,
                 x=x.copy(),
@@ -466,16 +477,21 @@ class SlackStrategy(BaseStrategy):
         # MPCC multipliers are λ_{G-sG} and λ_{H-sH} directly — no correction
         # needed since the G*H constraint acts on slacks, not on x.
         # Bound multipliers are for z=[x,sG,sH]; only the first n entries apply to x.
-        _off = p.n_ineq + p.n_eq
-        mpcc_mult_G = last_info["mult_g"][_off       : _off + n_c]
-        mpcc_mult_H = last_info["mult_g"][_off + n_c : _off + 2 * n_c]
-        result.kkt_residual = compute_kkt_residual(
-            result, p,
-            mpcc_mult_G=mpcc_mult_G,
-            mpcc_mult_H=mpcc_mult_H,
-            mult_x_L=last_info.get("mult_x_L"),
-            mult_x_U=last_info.get("mult_x_U"),
-        )
+        mg_final = last_info.get("mult_g")
+        if mg_final is not None and len(mg_final):
+            _off = p.n_ineq + p.n_eq
+            mpcc_mult_G = mg_final[_off       : _off + n_c]
+            mpcc_mult_H = mg_final[_off + n_c : _off + 2 * n_c]
+            result.kkt_residual = compute_kkt_residual(
+                result, p,
+                mpcc_mult_G=mpcc_mult_G,
+                mpcc_mult_H=mpcc_mult_H,
+                mult_x_L=last_info.get("mult_x_L"),
+                mult_x_U=last_info.get("mult_x_U"),
+            )
+        else:
+            mpcc_mult_G = None
+            mpcc_mult_H = None
         result = self._maybe_run_cleanup(
             result, last_info, x, mpcc_mult_G, mpcc_mult_H,
         )

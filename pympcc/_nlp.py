@@ -153,7 +153,11 @@ class _DenseNLP(cyipopt.Problem):
 
     def intermediate(self, alg_mod, iter_count, obj_value, inf_pr, inf_du,
                      mu, d_norm, regularization_size, alpha_du, alpha_pr,
-                     ls_trials) -> bool:
+                     ls_trials, *args, **kwargs) -> bool:
+        # ``*args, **kwargs`` swallows any positional/keyword arguments
+        # cyipopt adds in future versions (e.g. IPOPT 3.14's ``tau``
+        # may be exposed) so we don't silently miswire on signature
+        # drift; existing fields stay extracted by their fixed slots.
         self.n_ipopt_iter = iter_count + 1
         self.last_alg_mod = int(alg_mod)
         # alg_mod == 1 indicates IPOPT is inside the restoration phase
@@ -280,7 +284,9 @@ class _SparseNLP(cyipopt.Problem):
 
     def intermediate(self, alg_mod, iter_count, obj_value, inf_pr, inf_du,
                      mu, d_norm, regularization_size, alpha_du, alpha_pr,
-                     ls_trials) -> bool:
+                     ls_trials, *args, **kwargs) -> bool:
+        # ``*args, **kwargs`` makes the callback forward-compatible with
+        # cyipopt signature additions; see ``_DenseNLP.intermediate``.
         self.n_ipopt_iter = iter_count + 1
         self.last_alg_mod = int(alg_mod)
         if alg_mod == 1:

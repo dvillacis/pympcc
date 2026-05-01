@@ -243,3 +243,115 @@ def test_invalid_strategy_options_raise(strategy, bad_options, match):
     problem = pympcc.MPCCProblem(**_base_kwargs())
     with pytest.raises(ValueError, match=match):
         pympcc.MPCCSolver(problem, strategy=strategy, **bad_options)
+
+
+# --------------------------------------------------------------------------- #
+# Edge-case problem dimensions (§7.3.6)                                         #
+# --------------------------------------------------------------------------- #
+
+class TestEdgeCaseDimensions:
+    """Sweep degenerate problem dimensions: n_comp=0 (rejected), n=1,
+    no inequality / equality constraints, and fully-pinned bounds.
+    """
+
+    def test_n_comp_zero_rejected_with_clear_message(self):
+        """``n_comp=0`` is not an MPCC — it should be rejected with an
+        actionable error so users know to use a plain NLP solver."""
+        kw = _base_kwargs()
+        kw["n_comp"] = 0
+        with pytest.raises(ValueError, match=r"n_comp must be >= 1"):
+            pympcc.MPCCProblem(**kw)
+
+    @pytest.mark.parametrize("strategy", [
+        "scholtes", "smoothing", "lin_fukushima", "slack",
+        "augmented_lagrangian",
+    ])
+    def test_n_eq_zero_n_ineq_zero(self, strategy):
+        """No equality and no inequality constraints (only complementarity
+        + bounds) — the most common case but worth pinning."""
+        problem = pympcc.MPCCProblem(**_base_kwargs())
+        assert problem.n_ineq == 0
+        assert problem.n_eq == 0
+        result = pympcc.solve(problem, strategy=strategy,
+                              ipopt_options={"max_iter": 100, "tol": 1e-7})
+        assert result.success, f"{strategy} failed: {result.message}"
+        assert result.comp_residual < 1e-6
+
+    @pytest.mark.parametrize("strategy", [
+        "scholtes", "smoothing", "lin_fukushima", "slack",
+        "augmented_lagrangian",
+    ])
+    def test_single_variable(self, strategy):
+        """``n=1`` MPCC: G(x) = x, H(x) = x, optimum at x=0."""
+        problem = pympcc.MPCCProblem(
+            n=1, n_comp=1,
+            x0=np.array([0.5]),
+            xl=np.array([0.0]),
+            objective=lambda x: float((x[0] - 0.7) ** 2),
+            gradient=lambda x: np.array([2.0 * (x[0] - 0.7)]),
+            comp_G=lambda x: np.array([x[0]]),
+            comp_G_jacobian=lambda x: np.array([[1.0]]),
+            comp_H=lambda x: np.array([x[0]]),
+            comp_H_jacobian=lambda x: np.array([[1.0]]),
+        )
+        result = pympcc.solve(problem, strategy=strategy,
+                              ipopt_options={"max_iter": 100, "tol": 1e-7})
+        assert result.success, f"{strategy} (n=1) failed: {result.message}"
+        # G·H = x^2 = 0 ⟹ x = 0; that minimises (x-0.7)^2 over x ≥ 0
+        # subject to G·H=0 (since x=0.7 violates complementarity).
+        # Relaxation strategies satisfy x^2 ≤ ε_min ≈ 1e-8, so x ≈ 1e-4
+        # is the expected accuracy.  AL is quasi-Newton and tolerates a
+        # looser bound.
+        assert result.x[0] == pytest.approx(0.0, abs=5e-3)
+        assert result.comp_residual < 1e-4
+
+    @pytest.mark.parametrize("strategy", [
+        "scholtes", "smoothing", "lin_fukushima", "slack",
+    ])
+    def test_fully_pinned_bounds(self, strategy):
+        """``xl == xu`` for every variable — the problem reduces to a
+        single feasible point.  Should succeed (with or without presolve)
+        and return that fixed point."""
+        x_fix = np.array([0.3, 0.0])
+        problem = pympcc.MPCCProblem(
+            n=2, n_comp=1,
+            x0=x_fix.copy(),
+            xl=x_fix.copy(),
+            xu=x_fix.copy(),
+            objective=lambda x: float(np.sum(x ** 2)),
+            gradient=lambda x: 2.0 * x,
+            comp_G=lambda x: np.array([x[0]]),
+            comp_G_jacobian=lambda x: np.array([[1.0, 0.0]]),
+            comp_H=lambda x: np.array([x[1]]),
+            comp_H_jacobian=lambda x: np.array([[0.0, 1.0]]),
+        )
+        result = pympcc.solve(problem, strategy=strategy,
+                              ipopt_options={"max_iter": 50, "tol": 1e-7})
+        assert result.success, f"{strategy} (fully pinned) failed: {result.message}"
+        np.testing.assert_allclose(result.x, x_fix, atol=1e-7)
+
+    def test_fully_pinned_with_presolve(self):
+        """Pinned-var elimination should reduce a fully-pinned problem
+        to ``n_red=0``; presolve must short-circuit gracefully rather
+        than try to build an empty NLP."""
+        x_fix = np.array([0.3, 0.0])
+        problem = pympcc.MPCCProblem(
+            n=2, n_comp=1,
+            x0=x_fix.copy(),
+            xl=x_fix.copy(),
+            xu=x_fix.copy(),
+            objective=lambda x: float(np.sum(x ** 2)),
+            gradient=lambda x: 2.0 * x,
+            comp_G=lambda x: np.array([x[0]]),
+            comp_G_jacobian=lambda x: np.array([[1.0, 0.0]]),
+            comp_H=lambda x: np.array([x[1]]),
+            comp_H_jacobian=lambda x: np.array([[0.0, 1.0]]),
+        )
+        # Presolve may either (a) refuse to reduce when n_red would be 0,
+        # or (b) reduce successfully and return the pinned values.  Either
+        # is acceptable; what is *not* acceptable is a crash.
+        result = pympcc.solve(problem, strategy="scholtes",
+                              ipopt_options={"max_iter": 50, "tol": 1e-7},
+                              presolve=True)
+        assert result.success
+        np.testing.assert_allclose(result.x, x_fix, atol=1e-7)

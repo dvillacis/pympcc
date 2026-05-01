@@ -9,6 +9,10 @@ from typing import cast
 
 import numpy as np
 
+from .._constants import (
+    CLEANUP_TOL_FLOOR as _CLEANUP_TOL_FLOOR,
+    EPS_DIV_GUARD as _EPS_DIV_GUARD,
+)
 from .._kernels import coo_to_dense as _coo_kernel
 from .._kernels import eval_weighted_union as _wu_kernel
 from .._kernels import weighted_row_sum as _wrs_kernel
@@ -89,6 +93,10 @@ class BaseStrategy(ABC):
         self.inner_callback = kwargs.pop("inner_callback", None)
         self.time_limit: float | None = kwargs.pop("time_limit", None)
         self._time_limit_hit: bool = False
+        # Outer-solve start time, set by ``_run_epsilon_continuation`` and
+        # consulted by ``_maybe_run_cleanup`` so cleanup respects the same
+        # wall-clock budget.  ``None`` for single-shot strategies.
+        self._wall_t0: float | None = None
         # Hot-start machinery (§6.5).  ``_initial_warm_dual`` is a one-shot
         # seed consumed by the strategy's first ``nlp.solve`` call when
         # :meth:`MPCCSolver.resolve` injects state from a previous solve.
@@ -977,7 +985,7 @@ class BaseStrategy(ABC):
             # quasi-Newton dual residuals it can't drive below the analytical
             # tolerance.
             nlp.add_option("hessian_approximation", "limited-memory")
-            cu_tol_floor = 1e-6
+            cu_tol_floor = _CLEANUP_TOL_FLOOR
         else:
             cu_tol_floor = 0.0
         nlp.add_option("max_iter", int(self.cleanup_max_iter))
@@ -1078,6 +1086,13 @@ class BaseStrategy(ABC):
                 return result
 
         p = self.problem
+        # Skip cleanup entirely when the continuation already exhausted
+        # the user-supplied wall-clock budget — the cleanup NLP can be
+        # expensive and we shouldn't run past the budget.
+        if self._time_limit_hit:
+            result.cleanup_status   = -998
+            result.cleanup_accepted = False
+            return result
         try:
             # Evaluate G,H in the same (possibly scaled) space the multipliers
             # live in; otherwise the magnitude/multiplier rule mixes spaces
@@ -1086,6 +1101,16 @@ class BaseStrategy(ABC):
             I_G, I_H = self._infer_active_set(G_init, H_init,
                                               mpcc_mult_G, mpcc_mult_H)
             nlp, _cache = self._build_cleanup_nlp(I_G, I_H)
+            # Bound the cleanup solve by remaining wall-clock budget so it
+            # cannot run past ``self.time_limit``.
+            if self.time_limit is not None and self._wall_t0 is not None:
+                _remaining = self.time_limit - (time.perf_counter() - self._wall_t0)
+                if _remaining <= 0:
+                    self._time_limit_hit = True
+                    result.cleanup_status   = -998
+                    result.cleanup_accepted = False
+                    return result
+                nlp.add_option("max_cpu_time", float(_remaining))
             x_cu, info_cu, _t = self._timed_solve(nlp, x_orig, {})
         except Exception as exc:                          # pragma: no cover
             warnings.warn(
@@ -1211,6 +1236,9 @@ class BaseStrategy(ABC):
         best_comp: float = float("inf")
         self._time_limit_hit = False
         wall_t0 = time.perf_counter()
+        # Exposed so ``_maybe_run_cleanup`` can compute remaining budget
+        # against the same outer-solve start.
+        self._wall_t0 = wall_t0
 
         rollback_on    = getattr(self, "safeguard_rollback", False)
         adaptive_on    = getattr(self, "safeguard_adaptive_eps", False)
@@ -1279,6 +1307,19 @@ class BaseStrategy(ABC):
                 inner_tol = max(user_tol, eps * 1e-2)
             nlp.add_option("tol", inner_tol)
 
+            # Bound the inner IPOPT solve by the remaining outer budget.
+            # ``time_limit`` is wall-clock; IPOPT's ``max_cpu_time`` is CPU
+            # time of the IPOPT thread, which approximates wall-clock for
+            # single-threaded solves (the default).  Without this, a single
+            # hard inner NLP can run minutes past the user's budget — the
+            # outer-loop check only fires *between* iterations.
+            if self.time_limit is not None:
+                _remaining = self.time_limit - (time.perf_counter() - wall_t0)
+                if _remaining <= 0:
+                    self._time_limit_hit = True
+                    break
+                nlp.add_option("max_cpu_time", float(_remaining))
+
             # Snapshot for rollback (before inner solve overwrites x/warm_dual).
             if rollback_on:
                 snap_x        = x.copy()
@@ -1293,11 +1334,17 @@ class BaseStrategy(ABC):
             x, last_info, iter_time = self._timed_solve(nlp, x, warm_dual)
             total_time += iter_time
             if self.dual_warmstart:
-                warm_dual = {
-                    "lagrange": last_info["mult_g"],
-                    "zl":       last_info["mult_x_L"],
-                    "zu":       last_info["mult_x_U"],
-                }
+                # Only seed the next inner solve when the previous one
+                # actually produced multipliers; a backend or IPOPT failure
+                # mode that omits ``mult_g`` would otherwise pass ``None``
+                # into cyipopt's ``lagrange=`` and crash there.
+                _mg = last_info.get("mult_g")
+                if _mg is not None and len(_mg):
+                    warm_dual = {
+                        "lagrange": _mg,
+                        "zl":       last_info.get("mult_x_L"),
+                        "zu":       last_info.get("mult_x_U"),
+                    }
 
             info = make_iteration(eps, x, last_info, nlp.n_ipopt_iter, iter_time)
             # Restoration-phase diagnostics — populated regardless of rollback
@@ -1405,9 +1452,9 @@ class BaseStrategy(ABC):
             # large problems.
             if plateau_on and prev_obj_acc is not None and prev_comp_acc is not None:
                 d_obj = (abs(info.obj - prev_obj_acc)
-                         / max(abs(info.obj), 1e-12))
+                         / max(abs(info.obj), _EPS_DIV_GUARD))
                 d_comp = (abs(info.comp_residual - prev_comp_acc)
-                          / max(prev_comp_acc, 1e-12))
+                          / max(prev_comp_acc, _EPS_DIV_GUARD))
                 comp_below_target = info.comp_residual <= plateau_target
                 if (d_obj < plateau_tol_obj
                         and d_comp < plateau_tol_comp

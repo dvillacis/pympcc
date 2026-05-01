@@ -94,10 +94,13 @@ class ScholtesStrategy(BaseStrategy):
         p = self.problem
         base_hess = p.lagrangian_hessian
         base_sp = p.lagrangian_hessian_sparsity
-        pad = p.n_comp
+        # Zero pad allocated once and captured by closure; treated as
+        # read-only by the user's lagrangian_hessian.
+        pad_zeros = np.zeros(p.n_comp)
 
-        def cleanup_hess(x, lam_cu, obj_factor, _base=base_hess, _pad=pad):
-            lam_full = np.concatenate([np.asarray(lam_cu), np.zeros(_pad)])
+        def cleanup_hess(x, lam_cu, obj_factor,
+                         _base=base_hess, _pad_zeros=pad_zeros):
+            lam_full = np.concatenate([np.asarray(lam_cu), _pad_zeros])
             return _base(x, lam_full, obj_factor)
 
         return cleanup_hess, base_sp
@@ -240,17 +243,21 @@ class ScholtesStrategy(BaseStrategy):
 
         def make_iteration(eps, x, last_info, n_ipopt_iter, iter_time):
             G, H = self._eval_comp_values(x, cache)
-            _off = n_g + n_h
-            _lam_G  = last_info["mult_g"][_off           : _off + n_c]
-            _lam_H  = last_info["mult_g"][_off + n_c     : _off + 2 * n_c]
-            _lam_GH = last_info["mult_g"][_off + 2 * n_c : _off + 3 * n_c]
-            _kkt = self._compute_kkt_iter(
-                x, last_info["mult_g"],
-                mpcc_mult_G=_lam_G + H * _lam_GH,
-                mpcc_mult_H=_lam_H + G * _lam_GH,
-                mult_x_L=last_info.get("mult_x_L"),
-                mult_x_U=last_info.get("mult_x_U"),
-            )
+            _mg = last_info.get("mult_g")
+            if _mg is not None and len(_mg):
+                _off = n_g + n_h
+                _lam_G  = _mg[_off           : _off + n_c]
+                _lam_H  = _mg[_off + n_c     : _off + 2 * n_c]
+                _lam_GH = _mg[_off + 2 * n_c : _off + 3 * n_c]
+                _kkt = self._compute_kkt_iter(
+                    x, _mg,
+                    mpcc_mult_G=_lam_G + H * _lam_GH,
+                    mpcc_mult_H=_lam_H + G * _lam_GH,
+                    mult_x_L=last_info.get("mult_x_L"),
+                    mult_x_U=last_info.get("mult_x_U"),
+                )
+            else:
+                _kkt = None
             return IterationInfo(
                 epsilon=eps,
                 x=x.copy(),
@@ -288,19 +295,24 @@ class ScholtesStrategy(BaseStrategy):
         result.stationarity = classify_stationarity(result, self.problem)
         # Scholtes layout: [g, h, G, H, G*H-ε].  MPCC multipliers are
         # μ_G = λ_G + H ⊙ λ_GH  and  μ_H = λ_H + G ⊙ λ_GH.
-        _off = n_g + n_h
-        lam_G  = last_info["mult_g"][_off           : _off + n_c]
-        lam_H  = last_info["mult_g"][_off + n_c     : _off + 2 * n_c]
-        lam_GH = last_info["mult_g"][_off + 2 * n_c : _off + 3 * n_c]
-        mpcc_mult_G = lam_G + result.H * lam_GH
-        mpcc_mult_H = lam_H + result.G * lam_GH
-        result.kkt_residual = compute_kkt_residual(
-            result, self.problem,
-            mpcc_mult_G=mpcc_mult_G,
-            mpcc_mult_H=mpcc_mult_H,
-            mult_x_L=last_info.get("mult_x_L"),
-            mult_x_U=last_info.get("mult_x_U"),
-        )
+        mg_final = last_info.get("mult_g")
+        if mg_final is not None and len(mg_final):
+            _off = n_g + n_h
+            lam_G  = mg_final[_off           : _off + n_c]
+            lam_H  = mg_final[_off + n_c     : _off + 2 * n_c]
+            lam_GH = mg_final[_off + 2 * n_c : _off + 3 * n_c]
+            mpcc_mult_G = lam_G + result.H * lam_GH
+            mpcc_mult_H = lam_H + result.G * lam_GH
+            result.kkt_residual = compute_kkt_residual(
+                result, self.problem,
+                mpcc_mult_G=mpcc_mult_G,
+                mpcc_mult_H=mpcc_mult_H,
+                mult_x_L=last_info.get("mult_x_L"),
+                mult_x_U=last_info.get("mult_x_U"),
+            )
+        else:
+            mpcc_mult_G = None
+            mpcc_mult_H = None
         result = self._maybe_run_cleanup(
             result, last_info, x, mpcc_mult_G, mpcc_mult_H,
         )

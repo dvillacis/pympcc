@@ -8,6 +8,7 @@ from typing import Callable, Literal, Optional, Union
 import numpy as np
 
 from ._autoscale import autoscale_comp_pairs as _autoscale_comp_pairs
+from ._constants import BIACTIVE_TOL_FLOOR
 from ._diagnostics import classify_cq as _classify_cq
 from ._diagnostics import degeneracy_report as _degeneracy_report
 from ._diagnostics import initial_point_statistics as _initial_point_stats
@@ -25,10 +26,15 @@ from .strategies.augmented_lagrangian import AugmentedLagrangianStrategy
 from .strategies.direct import DirectStrategy
 from .strategies.lin_fukushima import LinFukushimaStrategy
 from .strategies.ncp import (
+    BillupsStrategy,
     ChenChenKanzowStrategy,
+    ChenMangasarianStrategy,
     KanzowSchwartzStrategy,
     SmoothMinStrategy,
+    VeelkenUlbrichPowStrategy,
+    VeelkenUlbrichSinStrategy,
 )
+from .strategies.ncp_reformulation import NCPReformulationStrategy
 from .strategies.scholtes import ScholtesStrategy
 from .strategies.slack import SlackStrategy
 from .strategies.smoothing import SmoothingStrategy
@@ -85,6 +91,9 @@ StrategyName = Literal[
     "direct", "scholtes", "smoothing", "lin_fukushima",
     "augmented_lagrangian", "slack",
     "smooth_min", "chen_chen_kanzow", "kanzow_schwartz",
+    "chen_mangasarian", "billups",
+    "veelken_ulbrich_pow", "veelken_ulbrich_sin",
+    "ncp",
 ]
 
 _STRATEGIES = {
@@ -97,6 +106,11 @@ _STRATEGIES = {
     "smooth_min": SmoothMinStrategy,
     "chen_chen_kanzow": ChenChenKanzowStrategy,
     "kanzow_schwartz": KanzowSchwartzStrategy,
+    "chen_mangasarian": ChenMangasarianStrategy,
+    "billups": BillupsStrategy,
+    "veelken_ulbrich_pow": VeelkenUlbrichPowStrategy,
+    "veelken_ulbrich_sin": VeelkenUlbrichSinStrategy,
+    "ncp": NCPReformulationStrategy,
 }
 
 _log = logging.getLogger("pympcc")
@@ -538,7 +552,7 @@ class MPCCSolver:
         comp = float(np.max(np.abs(G * H))) if G.size else 0.0
         # Slight upward slack (1 ppm) so that G≈H≈sqrt(comp) cases aren't
         # rejected by a ULP-level floating-point boundary.
-        tol = max(np.sqrt(comp) * (1.0 + 1e-6), 1e-6)
+        tol = max(np.sqrt(comp) * (1.0 + BIACTIVE_TOL_FLOOR), BIACTIVE_TOL_FLOOR)
         status = []
         for g, h in zip(G, H):
             if g <= tol and h <= tol:
@@ -587,6 +601,7 @@ def solve(
     n_starts: int = 1,
     perturb_scale: float = 0.1,
     multistart_seed: int = 0,
+    n_jobs: int = 1,
     **strategy_options,
 ) -> MPCCResult:
     """
@@ -665,6 +680,7 @@ def solve(
             n_starts=n_starts,
             perturb_scale=perturb_scale,
             seed=multistart_seed,
+            n_jobs=n_jobs,
             strategy=strategy,
             backend=backend,
             ipopt_options=ipopt_options,

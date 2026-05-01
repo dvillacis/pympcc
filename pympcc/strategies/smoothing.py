@@ -285,18 +285,22 @@ class SmoothingStrategy(BaseStrategy):
 
         def make_iteration(eps, x, last_info, n_ipopt_iter, iter_time):
             G, H = self._eval_comp_values(x, cache)
-            _off = n_g + n_h
-            _lam_G   = last_info["mult_g"][_off           : _off + n_c]
-            _lam_H   = last_info["mult_g"][_off + n_c     : _off + 2 * n_c]
-            _lam_phi = last_info["mult_g"][_off + 2 * n_c : _off + 3 * n_c]
-            _r_norm  = np.sqrt(G**2 + H**2 + eps**2)
-            _kkt = self._compute_kkt_iter(
-                x, last_info["mult_g"],
-                mpcc_mult_G=_lam_G + (1.0 - G / _r_norm) * _lam_phi,
-                mpcc_mult_H=_lam_H + (1.0 - H / _r_norm) * _lam_phi,
-                mult_x_L=last_info.get("mult_x_L"),
-                mult_x_U=last_info.get("mult_x_U"),
-            )
+            _mg = last_info.get("mult_g")
+            if _mg is not None and len(_mg):
+                _off = n_g + n_h
+                _lam_G   = _mg[_off           : _off + n_c]
+                _lam_H   = _mg[_off + n_c     : _off + 2 * n_c]
+                _lam_phi = _mg[_off + 2 * n_c : _off + 3 * n_c]
+                _r_norm  = np.sqrt(G**2 + H**2 + eps**2)
+                _kkt = self._compute_kkt_iter(
+                    x, _mg,
+                    mpcc_mult_G=_lam_G + (1.0 - G / _r_norm) * _lam_phi,
+                    mpcc_mult_H=_lam_H + (1.0 - H / _r_norm) * _lam_phi,
+                    mult_x_L=last_info.get("mult_x_L"),
+                    mult_x_U=last_info.get("mult_x_U"),
+                )
+            else:
+                _kkt = None
             return IterationInfo(
                 epsilon=eps,
                 x=x.copy(),

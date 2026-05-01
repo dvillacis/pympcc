@@ -27,8 +27,8 @@ s.t. g(x) ≤ 0              (inequality constraints)
 brew install ipopt                           # macOS
 sudo apt-get install coinor-libipopt-dev     # Linux
 
-pip install "pympcc[ipopt]"                  # default backend
-pip install "pympcc[scipy]"                  # SciPy backend only
+pip install pympcc                           # default — pulls cyipopt
+pip install "pympcc[scipy]"                  # also include the SciPy backend
 pip install "pympcc[jax]"                    # solve_jax + JAX-AD derivatives
 pip install "pympcc[dev]"                    # for development
 ```
@@ -91,6 +91,19 @@ uv run pytest tests/ -v
 ```
 
 The suite covers all six strategies, all diagnostic modules, the MacMPEC benchmark collection, sensitivity, and `solve_jax`. The `direct` strategy tests are marked `xfail(strict=False)` because LICQ generically fails at MPCC feasible points.
+
+## Acknowledgements
+
+pympcc is a thin orchestration layer on top of two excellent
+upstream projects:
+
+- [**IPOPT**](https://github.com/coin-or/Ipopt) — the interior-point
+  NLP solver that does the actual numerical heavy lifting (Eclipse
+  Public License 2.0, &copy; the COIN-OR Foundation contributors).
+- [**cyipopt**](https://github.com/mechmotum/cyipopt) — the Python
+  bindings to IPOPT, by the cyipopt maintainers (EPL 2.0).
+
+If you use pympcc in published work, please cite IPOPT alongside it.
 
 ## References
 
