@@ -174,13 +174,14 @@ class BaseStrategy(ABC):
         # ------------------------------------------------------------------ #
         # filterSQP backend                                                    #
         # ------------------------------------------------------------------ #
-        if self.backend == "filterSQP":  # pragma: no cover
+        if self.backend == "filterSQP":
             try:
-                from pyfiltersqp import _FilterSQPAdapter
+                from .._filtersqp_adapter import _FilterSQPAdapter
             except ImportError as exc:
                 raise ImportError(
                     "backend='filterSQP' requires the pyfiltersqp package. "
-                    "Install it or switch to backend='ipopt'."
+                    "Install it via `pip install pyfiltersqp` (or the "
+                    "`pympcc[filtersqp]` extra) or switch to backend='ipopt'."
                 ) from exc
             _jac_fn = jac_fn
             if jac_structure is not None:

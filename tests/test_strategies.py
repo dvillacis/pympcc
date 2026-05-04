@@ -651,6 +651,15 @@ class TestMiscBackend:
             pympcc.solve(SIMPLE.problem, backend="bad_backend")
 
     def test_filtersqp_import_error(self):
+        """When pyfiltersqp is not installed, ``backend='filterSQP'``
+        must raise an actionable ``ImportError`` rather than crashing
+        deep inside the strategy with a confusing AttributeError."""
+        try:
+            import pyfiltersqp  # noqa: F401
+        except ImportError:
+            pass
+        else:
+            pytest.skip("pyfiltersqp is installed; covered by smoke test")
         with pytest.raises(ImportError, match="pyfiltersqp"):
             pympcc.solve(SIMPLE.problem, backend="filterSQP")
 
@@ -842,3 +851,80 @@ class TestScipyBackend:
         r_ipopt = pympcc.solve(SIMPLE.problem, strategy="scholtes", backend="ipopt")
         r_scipy = pympcc.solve(SIMPLE.problem, strategy="scholtes", backend="scipy")
         np.testing.assert_allclose(r_ipopt.x, r_scipy.x, atol=1e-2)
+
+
+class TestFilterSQPBackend:
+    """Tests for backend=\"filterSQP\" (pyfiltersqp adapter).
+
+    Skipped when pyfiltersqp is not installed; the import-error path
+    is exercised by ``TestMiscBackend.test_filtersqp_import_error``.
+    """
+
+    pyfiltersqp = pytest.importorskip("pyfiltersqp")
+
+    @pytest.mark.parametrize("strategy", [
+        "direct", "scholtes", "smoothing", "lin_fukushima",
+    ])
+    def test_converges(self, strategy):
+        result = pympcc.solve(
+            SIMPLE.problem, strategy=strategy, backend="filterSQP",
+            ipopt_options={"max_iter": 200, "tol": 1e-7},
+        )
+        assert result.success, result.message
+
+    @pytest.mark.parametrize("strategy", [
+        "direct", "scholtes", "smoothing", "lin_fukushima",
+    ])
+    def test_comp_feasible(self, strategy):
+        result = pympcc.solve(
+            SIMPLE.problem, strategy=strategy, backend="filterSQP",
+            ipopt_options={"max_iter": 200, "tol": 1e-7},
+        )
+        assert result.comp_residual < 1e-4
+
+    @pytest.mark.parametrize("strategy", [
+        "direct", "scholtes", "smoothing", "lin_fukushima",
+    ])
+    def test_objective(self, strategy):
+        """SIMPLE has obj* = 1.0; the filterSQP solve must agree to 1e-2."""
+        result = pympcc.solve(
+            SIMPLE.problem, strategy=strategy, backend="filterSQP",
+            ipopt_options={"max_iter": 200, "tol": 1e-7},
+        )
+        assert abs(result.obj - 1.0) < 1e-2
+
+    def test_result_fields_present(self):
+        result = pympcc.solve(
+            SIMPLE.problem, backend="filterSQP",
+            ipopt_options={"max_iter": 200, "tol": 1e-7},
+        )
+        assert result.x.shape == (SIMPLE.problem.n,)
+        assert result.G.shape == (SIMPLE.problem.n_comp,)
+        assert result.H.shape == (SIMPLE.problem.n_comp,)
+        assert isinstance(result.obj, float)
+        assert isinstance(result.success, bool)
+        assert result.mult_g is not None
+
+    def test_matches_ipopt_solution(self):
+        """IPOPT and filterSQP backends must agree on x* to within 1e-2."""
+        opts = {"max_iter": 200, "tol": 1e-7}
+        r_ipopt = pympcc.solve(SIMPLE.problem, strategy="scholtes",
+                                backend="ipopt", ipopt_options=opts)
+        r_fsqp  = pympcc.solve(SIMPLE.problem, strategy="scholtes",
+                                backend="filterSQP", ipopt_options=opts)
+        np.testing.assert_allclose(r_fsqp.x, r_ipopt.x, atol=1e-2)
+
+    def test_slack_strategy_rejected(self):
+        """The slack strategy is incompatible with backend=\"filterSQP\"
+        (see strategies/slack.py docstring); make sure the rejection is
+        clean rather than crashing inside the adapter."""
+        with pytest.raises(NotImplementedError, match="slack|filterSQP"):
+            pympcc.solve(SIMPLE.problem, strategy="slack", backend="filterSQP")
+
+    def test_sparse_problem(self):
+        result = pympcc.solve(
+            SIMPLE_SPARSE, strategy="scholtes", backend="filterSQP",
+            ipopt_options={"max_iter": 200, "tol": 1e-7},
+        )
+        assert result.success
+        assert result.comp_residual < 1e-4
