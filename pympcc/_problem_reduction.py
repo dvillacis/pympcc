@@ -801,8 +801,8 @@ def _extend_with_doubly_bounded(p: "MPCCProblem", db_entries: list,
     p.xu = np.concatenate([p.xu, np.full(2 * k, np.inf)])
     p.x0 = np.concatenate([p.x0, np.zeros(2 * k)])
     p.n = n_new
-    p.n_orig_doubly_bounded = n_orig
-    p.n_doubly_bounded_pairs = k
+    p.n_orig_doubly_bounded = n_orig  # type: ignore[attr-defined]
+    p.n_doubly_bounded_pairs = k  # type: ignore[attr-defined]
 
     # ---- Wrap objective + gradient -------------------------------------
     base_obj = p.objective

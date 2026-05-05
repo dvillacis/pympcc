@@ -431,7 +431,7 @@ class MPCCSolver:
             self.problem, self._presolve_map = _presolve(self.problem_orig)
         else:
             self.problem = self.problem_orig
-            self._presolve_map = None
+            self._presolve_map = None  # type: ignore[assignment]
         # Strategy holds its own reference to the problem; refresh it so
         # callbacks see the new numeric values.
         self._strategy.problem = self.problem
@@ -459,7 +459,7 @@ class MPCCSolver:
             self.problem, self._presolve_map = _presolve(self.problem_orig)
         else:
             self.problem = self.problem_orig
-            self._presolve_map = None
+            self._presolve_map = None  # type: ignore[assignment]
         if self._autoscale_on:
             self._apply_autoscale()
         self._signature = _problem_signature(self.problem)

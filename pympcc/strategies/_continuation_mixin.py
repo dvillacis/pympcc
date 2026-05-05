@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import time
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 
@@ -36,9 +37,33 @@ from .._constants import (
 )
 from ..result import IterationInfo
 
+if TYPE_CHECKING:
+    from ..problem import MPCCProblem
+
 
 class ContinuationMixin:
     """Auto-ε₀, option validation, and the ε-continuation outer loop."""
+
+    # Attributes set by ``BaseStrategy.__init__`` /
+    # ``_init_continuation_options``; declared here so type-checking the
+    # mixin in isolation succeeds.
+    problem: "MPCCProblem"
+    ipopt_options: dict
+    callback: Any
+    epsilon_0: float
+    epsilon_min: float
+    max_iter: int
+    reduction: float
+    comp_tol: float | None
+    dual_warmstart: bool
+    time_limit: float | None
+    _initial_warm_dual: dict | None
+    _time_limit_hit: bool
+    _wall_t0: float | None
+
+    # Helpers from ``BaseStrategy`` referenced by the outer loop.
+    _comp_residual: Callable[..., float]
+    _timed_solve: Callable[..., tuple[np.ndarray, dict, float]]
 
     @staticmethod
     def _resolve_auto_epsilon_0(

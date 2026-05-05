@@ -368,8 +368,8 @@ class SlackStrategy(BaseStrategy):
 
         def grad_lifted(z: np.ndarray) -> np.ndarray:
             _grad_buf[:n] = np.asarray(
-                p.gradient(z[:n]), dtype=float
-            )  # type: ignore[misc, operator]
+                p.gradient(z[:n]), dtype=float  # type: ignore[misc, operator]
+            )
             return _grad_buf
 
         hess_fn, hess_sparsity = None, None

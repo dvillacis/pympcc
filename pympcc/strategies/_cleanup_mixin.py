@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import time
 import warnings
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 
@@ -35,9 +36,28 @@ from .._constants import (
 )
 from ..result import MPCCResult
 
+if TYPE_CHECKING:
+    from ..problem import MPCCProblem
+
 
 class CleanupMixin:
     """Active-set polish phase for ε-continuation strategies."""
+
+    # Attributes set by ``BaseStrategy.__init__``; declared here so
+    # type-checking the mixin in isolation succeeds.
+    problem: "MPCCProblem"
+    ipopt_options: dict
+    time_limit: float | None
+    _time_limit_hit: bool
+    _wall_t0: float | None
+
+    # Helpers from ``BaseStrategy`` consumed by the cleanup pass.
+    _new_callback_cache: Callable[..., dict]
+    _make_jac_structure: Callable[..., tuple[np.ndarray, np.ndarray]]
+    _build_nlp: Callable[..., Any]
+    _eval_comp_values: Callable[..., tuple[np.ndarray, np.ndarray]]
+    _timed_solve: Callable[..., tuple[np.ndarray, dict, float]]
+    _decode_msg: Callable[..., str]
 
     def _init_cleanup(self, opts: dict, user_kwargs: dict | None = None) -> None:
         """Install active-set cleanup attributes on ``self``.

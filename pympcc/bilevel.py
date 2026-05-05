@@ -525,7 +525,7 @@ def from_epec(
         L = leaders[i_int].F(x_full, y)
         L = L + jnp.dot(xi_y, _stat_lo(x_full, y, lam_lo, mu_lo))
         if n_h > 0:
-            L = L + jnp.dot(xi_h, h_lo(x_full, y))
+            L = L + jnp.dot(xi_h, h_lo(x_full, y))  # type: ignore[misc]
         L = L + jnp.dot(theta, g_lo(x_full, y)) - jnp.dot(nu, lam_lo)
         return L
 

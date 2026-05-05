@@ -123,18 +123,18 @@ class BaseStrategy(SafeguardsMixin, CleanupMixin, ContinuationMixin, ABC):
         self.callback = kwargs.pop("callback", None)
         self.inner_callback = kwargs.pop("inner_callback", None)
         self.time_limit: float | None = kwargs.pop("time_limit", None)
-        self._time_limit_hit: bool = False
+        self._time_limit_hit = False
         # Outer-solve start time, set by ``_run_epsilon_continuation`` and
         # consulted by ``_maybe_run_cleanup`` so cleanup respects the same
         # wall-clock budget.  ``None`` for single-shot strategies.
-        self._wall_t0: float | None = None
+        self._wall_t0 = None
         # Hot-start machinery (§6.5).  ``_initial_warm_dual`` is a one-shot
         # seed consumed by the strategy's first ``nlp.solve`` call when
         # :meth:`MPCCSolver.resolve` injects state from a previous solve.
         # ``_last_solve_state`` is refreshed at the end of every
         # ``_timed_solve`` so :meth:`MPCCSolver.resolve` can fish out the
         # final-iterate multipliers regardless of which strategy ran.
-        self._initial_warm_dual: dict | None = None
+        self._initial_warm_dual = None
         self._last_solve_state: dict | None = None
         # Strategies that accept no extra kwargs (e.g. DirectStrategy) inherit
         # this base __init__; unknown kwargs are silently ignored so that
@@ -282,8 +282,8 @@ class BaseStrategy(SafeguardsMixin, CleanupMixin, ContinuationMixin, ABC):
                     return vals
             adapter = _FilterSQPAdapter(
                 n=p.n, m=len(cl),
-                xl=p.xl, xu=p.xu, cl=cl, cu=cu,
-                obj_fn=_obj, grad_fn=_grad,
+                xl=p.xl, xu=p.xu, cl=cl, cu=cu,  # type: ignore[arg-type]
+                obj_fn=_obj, grad_fn=_grad,  # type: ignore[arg-type]
                 con_fn=con_fn, jac_fn=_jac_fn,
                 solver_options=self.solver_options,
             )
