@@ -11,6 +11,47 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.0.0] - 2026-05-05
+
+The 1.0 release — feature freeze for the public API.  Every Phase-1
+through Phase-3 roadmap item is shipped; remaining work is opt-in
+research (B&B, EPEC v2, MPECopt piecewise-SQP) tracked in
+`ROADMAP.md`.
+
+### Added
+
+**Executable example notebooks (ReadTheDocs)**
+- 13 new myst-nb notebooks under `docs/examples/` — every cell is
+  executed by Sphinx on each docs build with
+  `nb_execution_raise_on_error=True`, so example output cannot drift
+  from the code.
+- *Getting started:* `simple_qpcc`, `strategies_tour`, `mcp_form`,
+  `sparse_jacobians`, `stationarity_hierarchy`, `kkt_residual`.
+- *Strategies & solvers:* `slack_strategy`, `ncp_variants_tour`,
+  `multistart`, `warm_start`.
+- *Diagnostics & certification:* `presolve`, `diagnostics_tour`,
+  `tnlp_refinement`.
+- `docs/examples/index.md` reorganised into four thematic sections;
+  cross-links between notebooks where features compose
+  (e.g. `kkt_residual` → `tnlp_refinement` → `diagnostics_tour`).
+- `examples/README.md` rewritten as an index pointing at the rendered
+  notebooks instead of duplicating their content.
+
+### Changed
+
+- `pyproject.toml` classifier flipped from
+  `Development Status :: 4 - Beta` to
+  `Development Status :: 5 - Production/Stable`.
+
+### Stability
+
+- Public API surface (everything re-exported from `pympcc/__init__.py`)
+  is now considered stable.  Subsequent 1.x releases will follow
+  semantic versioning: additive changes in minor releases, breaking
+  changes deferred to 2.0.
+
+---
+
 ## [0.6.0] - 2026-05-05
 
 The Phase-3 hardening release.  Closes every audit-flagged debt item

@@ -87,4 +87,4 @@ __all__ = [
     "Leader",
     "LowerLevel",
 ]
-__version__ = "0.6.0"
+__version__ = "1.0.0"

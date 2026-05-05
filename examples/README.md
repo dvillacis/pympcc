@@ -21,26 +21,44 @@ pympcc is installed in your active environment).
 | [`11_kkt_residual.py`](11_kkt_residual.py) | Reading the MPCC-KKT residual to gauge stationarity quality | `result.kkt_residual`, `compute_kkt_residual` |
 | [`perf_profile.py`](perf_profile.py) | Wall-clock + cProfile performance scan across problem sizes | profiling harness |
 
-## Topics covered elsewhere
+## Executable notebooks on the docs site
 
-These features have user-guide pages but no dedicated `examples/*.py`
-script.  See the linked pages for runnable snippets:
+The bulk of the package's runnable demos live as myst-nb notebooks
+under [`docs/examples/`](../docs/examples/) — they are executed by
+Sphinx on every docs build, so the outputs cannot drift from the
+code.  Browse them on the rendered site, or open the markdown
+directly:
 
-* **Bilevel emission** — [docs/examples/bilevel_demo.md](../docs/examples/bilevel_demo.md)
-  walks through `pympcc.from_lower_level` on two small bilevels.
+**Getting started:**
+* [A first MPCC](../docs/examples/simple_qpcc.md)
+* [Tour of strategies](../docs/examples/strategies_tour.md)
+* [MCP variable-paired form](../docs/examples/mcp_form.md)
+* [Sparse Jacobians](../docs/examples/sparse_jacobians.md)
+* [Stationarity hierarchy](../docs/examples/stationarity_hierarchy.md)
+* [KKT residual](../docs/examples/kkt_residual.md)
+
+**Strategies & solvers:**
+* [Slack-lifting strategy](../docs/examples/slack_strategy.md)
+* [NCP variants](../docs/examples/ncp_variants_tour.md)
+* [Multistart](../docs/examples/multistart.md)
+* [Stateful warm hot-start](../docs/examples/warm_start.md)
+
+**Diagnostics & certification:**
+* [Presolve](../docs/examples/presolve.md)
+* [Diagnostics tour](../docs/examples/diagnostics_tour.md)
+* [TNLP refinement](../docs/examples/tnlp_refinement.md)
+
+**Bilevel & differentiable:**
+* [Bilevel KKT emission](../docs/examples/bilevel_demo.md)
+* [Differentiable solve via custom_vjp](../docs/examples/solve_jax_demo.md)
+* [Parametric sweep](../docs/examples/parametric_sweep.md)
+
+**Topics covered elsewhere:**
 * **EPEC multi-leader emission** — [docs/user_guide/epec.md](../docs/user_guide/epec.md)
   contains a Cournot-game quickstart for `pympcc.from_epec`.
-* **Differentiable solve** — [docs/examples/solve_jax_demo.md](../docs/examples/solve_jax_demo.md)
-  uses `solve_jax` and `jax.grad` end-to-end.
-* **Parametric sensitivity** — [docs/examples/parametric_sweep.md](../docs/examples/parametric_sweep.md)
-  validates `pympcc.sensitivity(...)` against a re-solve.
 * **AMPL `.nl` reader** — [docs/user_guide/ampl_io.md](../docs/user_guide/ampl_io.md).
 * **Pyomo frontend** — [docs/user_guide/problem_setup.md](../docs/user_guide/problem_setup.md)
   has a `from_pyomo` snippet.
-* **Presolve / multistart** — [docs/user_guide/presolve_multistart.md](../docs/user_guide/presolve_multistart.md).
-* **NCP-function variants** — [docs/user_guide/strategies.md](../docs/user_guide/strategies.md)
-  documents the seven smooth-NCP entry points; pick one and pass to
-  `pympcc.solve(strategy="...")`.
 
 ## Running
 

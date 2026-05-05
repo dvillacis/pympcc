@@ -1,6 +1,6 @@
 [project]
 name = "pympcc"
-version = "0.6.0"
+version = "1.0.0"
 description = "Python solver for Mathematical Programs with Complementarity Constraints (MPCC) using IPOPT via cyipopt"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -13,7 +13,7 @@ keywords = [
     "ipopt", "nonlinear-programming", "bilevel-optimization",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
