@@ -49,6 +49,28 @@ See `CLAUDE.md` for a high-level architecture sketch (data flow,
 strategy contract, where to add a new reformulation). The roadmap is
 in `ROADMAP.md`.
 
+## Pre-commit hooks
+
+The repo ships a `.pre-commit-config.yaml` that mirrors the
+lint + type-check job CI runs.  Install once per clone:
+
+```bash
+uv tool install pre-commit
+pre-commit install
+```
+
+The hooks run `ruff check`, `ruff format`, `mypy`, and the standard
+trailing-whitespace / EOF-fixer guards on every commit.  To run the
+full check on a clean tree (e.g. before opening a PR):
+
+```bash
+pre-commit run --all-files
+```
+
+If a hook needs to be bypassed for an emergency push, the canonical
+escape hatch is `git commit --no-verify` — but please open a
+follow-up commit fixing whatever the hook flagged.
+
 ## Coding conventions
 
 - Format and lint with `ruff` (`uv run ruff check . && uv run ruff format .`).

@@ -106,3 +106,37 @@ jobs:
       - name: Run tests (Numba enabled)
         run: pytest tests/ -v --tb=short --cov=pympcc --cov-report=term-missing
         shell: micromamba-shell {0}
+
+  # ------------------------------------------------------------------ #
+  # All-extras integration: numba + jax + scipy + pyomo + pyfiltersqp  #
+  # in one environment to catch interaction bugs the per-extra jobs    #
+  # would miss (e.g. numba ↔ jax JIT cache collisions, pyomo's NL      #
+  # writer + the AMPL frontend's reader sharing tempfile paths).       #
+  # ------------------------------------------------------------------ #
+  test-all-extras:
+    name: "Python 3.11 + pympcc[all]"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: ci-all
+          create-args: >-
+            python=3.11
+            cyipopt>=1.3
+            numpy>=1.24
+            scipy>=1.10
+            numba>=0.57
+            pyomo>=6.7
+            pytest>=7.0
+            pytest-cov
+
+      - name: Install pympcc with all extras (jax + pyfiltersqp via pip)
+        run: pip install -e ".[all]"
+        shell: micromamba-shell {0}
+
+      - name: Run full test suite
+        run: pytest tests/ -v --tb=short
+        shell: micromamba-shell {0}

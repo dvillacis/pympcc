@@ -77,6 +77,14 @@ FBBT_TOL: Final[float] = 1e-9
 #: ``LINEARITY_TOL * scale``.
 LINEARITY_TOL: Final[float] = 1e-9
 
+# -- Sparsity ---------------------------------------------------- #
+
+#: Threshold below which a JAX-traced Jacobian / Hessian entry is
+#: treated as a structural zero when extracting the COO sparsity
+#: pattern.  Tighter than DEAD_VAL_TOL because we want to keep
+#: numerically tiny but structurally present entries.
+SPARSITY_TOL: Final[float] = 1e-12
+
 # -- Cancellation guards ----------------------------------------- #
 
 #: Divide-by-near-zero floor for ratio diagnostics.  Not a
@@ -97,5 +105,6 @@ __all__ = [
     "FREE_VAR_GRAD_TOL",
     "FBBT_TOL",
     "LINEARITY_TOL",
+    "SPARSITY_TOL",
     "EPS_DIV_GUARD",
 ]

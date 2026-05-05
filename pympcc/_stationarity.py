@@ -54,6 +54,7 @@ from typing import Optional
 
 import numpy as np
 
+from ._constants import BIACTIVE_TOL as _BIACTIVE_TOL
 from .problem import MPCCProblem
 from .result import MPCCResult
 
@@ -63,7 +64,7 @@ __all__ = ["classify_stationarity", "compute_kkt_residual", "verify_b_stationari
 def classify_stationarity(
     result: MPCCResult,
     problem: MPCCProblem,
-    tol: float = 1e-6,
+    tol: float = _BIACTIVE_TOL,
 ) -> str:
     """
     Classify the MPCC stationarity type of a solved result.
@@ -279,7 +280,7 @@ def verify_b_stationarity(
     result: MPCCResult,
     problem: MPCCProblem,
     *,
-    tol: float = 1e-6,
+    tol: float = _BIACTIVE_TOL,
     max_biactive: int = 10,
 ) -> dict:
     """
@@ -292,8 +293,8 @@ def verify_b_stationarity(
       * **G branch** (G stays active): ``∇G_iᵀ d = 0,  ∇H_iᵀ d ≥ 0``
       * **H branch** (H stays active): ``∇H_iᵀ d = 0,  ∇G_iᵀ d ≥ 0``
 
-    For every assignment of branches to the |I_00| pairs (2^|I_00| LPs),
-    solve::
+    For every assignment of branches to the ``|I_00|`` pairs
+    (``2^|I_00|`` LPs), solve::
 
         min  ∇f(x*)ᵀ d
         s.t. ∇g_jᵀ d ≤ 0          j active inequality (g_j(x*) ≥ -tol)
@@ -327,24 +328,26 @@ def verify_b_stationarity(
     Returns
     -------
     dict
-        ``status`` : one of
-            ``"B-stationary"`` — every branch min ≥ -tol.
-            ``"not B-stationary"`` — at least one branch admits descent.
-            ``"intractable"`` — ``|I_00| > max_biactive``; LP enumeration skipped.
-            ``"unknown"`` — ``result.success is False``.
-        ``n_biactive`` : ``|I_00|``.
-        ``n_branches_checked`` : LPs actually solved (0 on early exit).
-        ``min_descent`` : minimum ∇fᵀd over branches (``None`` on early exit).
-        ``witness_branch`` : tuple of ``'G'`` / ``'H'`` chars indexed by
-            the biactive pairs in I_00 order; ``None`` if B-stationary.
-        ``witness_d`` : ndarray, shape ``(n,)`` — the descent direction;
-            ``None`` if B-stationary.
+        Result dict with keys:
+
+        - ``status`` — one of ``"B-stationary"`` (every branch min ≥ -tol),
+          ``"not B-stationary"`` (at least one branch admits descent),
+          ``"intractable"`` (``|I_00| > max_biactive``; LP enumeration
+          skipped), or ``"unknown"`` (``result.success is False``).
+        - ``n_biactive`` — ``|I_00|``.
+        - ``n_branches_checked`` — LPs actually solved (0 on early exit).
+        - ``min_descent`` — minimum ``∇fᵀd`` over branches (``None`` on
+          early exit).
+        - ``witness_branch`` — tuple of ``'G'`` / ``'H'`` chars indexed by
+          the biactive pairs in I_00 order; ``None`` if B-stationary.
+        - ``witness_d`` — ndarray, shape ``(n,)`` — the descent direction;
+          ``None`` if B-stationary.
 
     Notes
     -----
     Uses dense LPs (``scipy.optimize.linprog`` with method ``"highs"``).
     Intended as a diagnostic for small/medium MPCCs; cost is
-    O(2^|I_00| · LP) and the per-LP build is dense in ``n``.
+    ``O(2^|I_00| · LP)`` and the per-LP build is dense in ``n``.
 
     The strongest stationarity level reachable from KKT multipliers alone
     (``classify_stationarity``) is S, which under MPCC-LICQ is equivalent

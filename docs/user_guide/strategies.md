@@ -1,6 +1,8 @@
 # Strategies
 
-Six NLP-based reformulation strategies are available. Each transforms the MPCC into one or more standard NLPs solved with IPOPT.
+Thirteen NLP-based reformulation strategies are available — six canonical plus seven NCP-function variants. Each transforms the MPCC into one or more standard NLPs solved with IPOPT. See the [selection guide](strategy_selection.md) for help picking the right one.
+
+## Canonical strategies
 
 | Strategy | How it works | Loop | Best for |
 |---|---|---|---|
@@ -11,12 +13,47 @@ Six NLP-based reformulation strategies are available. Each transforms the MPCC i
 | `"augmented_lagrangian"` | PHR penalty in the objective; complementarity never enters the NLP constraints | Yes | Problems where MFCQ fails |
 | `"slack"` | Lifts $G$, $H$ to slack variables; complementarity rows have zero $x$-entries | Yes | Large-$n$ problems ($n \gg n_\text{comp}$) |
 
-## Practical advice
+### Practical advice
 
 - `"scholtes"` is the safest default.
 - `"smoothing"` often achieves tighter complementarity residuals on smooth problems.
 - `"lin_fukushima"` is more robust on degenerate problems where Scholtes stalls.
 - `"slack"` is the best choice when $n$ is large (hundreds to thousands) and $n_\text{comp}$ is small — the Jacobian of the complementarity block is $O(n_\text{comp})$ rather than $O(n_\text{comp} \cdot n)$.
+
+## NCP-function variants
+
+Seven smoothed-NCP-function strategies share the same ε-continuation harness as `"smoothing"` but swap in different $\varphi_\varepsilon$ functions.  Each is a stand-alone strategy name (e.g. `pympcc.solve(problem, strategy="chen_chen_kanzow", lam=0.7)`) and is also reachable through the unified `strategy="ncp"` entry point with the matching `ncp_function=...` key.
+
+| Strategy | $\varphi_\varepsilon(G, H)$ | Param | When to reach for it |
+|---|---|---|---|
+| `"smooth_min"` | $\tfrac{1}{2}(G + H - \sqrt{(G-H)^2 + 4\varepsilon^2})$ | — | Symmetric smoothing of $\min(G, H)$. Stable when $G$ and $H$ have similar scales. |
+| `"chen_chen_kanzow"` | $\lambda\,\varphi_{\mathrm{FB},\varepsilon} + (1-\lambda)\,G H$ | `lam ∈ (0,1]` | Convex combination of Fischer-Burmeister and the inner-product penalty. ``lam → 1`` = pure smoothing; lower ``lam`` adds direct comp-pressure. |
+| `"kanzow_schwartz"` | $G + H - \sqrt{G^2 + H^2 + 2\lambda G H + \varepsilon^2}$ | `lam ∈ [0,1)` | Modified FB; `lam → 1` approaches smoothed $\lvert G + H \rvert$. |
+| `"chen_mangasarian"` | $G + H - \sqrt{G^2 + H^2 - 2\alpha G H + \varepsilon^2}$ | `alpha ∈ [0,1]` | FB↔min interpolation. `alpha=0` = FB, `alpha=1` = $2\min(G,H)$. Matches NLPEC's `CMxf` / `CMfx`. |
+| `"billups"` | $\varphi_{\mathrm{FB},\varepsilon} - \gamma G_{+\varepsilon} H_{+\varepsilon}$ | `gamma ≥ 0` | FB plus a positive-part penalty that pulls iterates harder onto the complementary cone.  Helps when FB stalls just inside the cone. |
+| `"veelken_ulbrich_pow"` | $\tfrac{1}{2}(G + H - \sigma_\varepsilon^{\mathrm{pow}}(G - H))$ | — | Smooth-min with a $C^2$ piecewise-polynomial smoothing of $\lvert\cdot\rvert$.  Good for Newton-type solvers that benefit from continuous second derivatives. |
+| `"veelken_ulbrich_sin"` | $\tfrac{1}{2}(G + H - (2t/\pi)\arctan(\pi t / 2\varepsilon))$, $t = G - H$ | — | Smooth-min with a $C^\infty$ arctan smoothing.  Vanishes exactly at $G = H = 0$, which can help second-order solvers. |
+
+### Practical advice for NCP variants
+
+- All seven share the ε-continuation knobs (`epsilon_0`, `reduction`, `max_iter`, `epsilon_min`, `comp_tol`, `dual_warmstart`) with `"smoothing"`.
+- The Veelken-Ulbrich pair is the natural choice when the user-supplied derivatives are smooth enough that the solver can exploit second-order information (`use_jax_hessian=True` on the problem).
+- `"chen_mangasarian"` with `alpha=0.5` is a good FB-replacement on problems where FB hits restoration; the asymmetric radicand often resolves the local stall.
+- `"billups"` with `gamma=0.05`-`0.1` adds a gentle pull onto the complementary cone — useful when the solution shows non-zero comp residual that FB can't drive below ~$10^{-6}$.
+
+## Unified NCP-function entry point
+
+```python
+result = pympcc.solve(
+    problem,
+    strategy="ncp",
+    ncp_function="chen_chen_kanzow",   # any registry key from the table above
+    ncp_params={"lam": 0.7},           # variant-specific overrides
+    epsilon_0=1.0, reduction=0.1,
+)
+```
+
+Equivalent to `pympcc.solve(problem, strategy="chen_chen_kanzow", lam=0.7)`. The `strategy="ncp"` entry point is preferred when you want to sweep over multiple NCP functions without changing strategy names.
 
 ## `solve` options
 

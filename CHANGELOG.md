@@ -11,6 +11,189 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.6.0] - 2026-05-05
+
+The Phase-3 hardening release.  Closes every audit-flagged debt item
+in `ROADMAP.md` §7 ahead of a public 1.0; no API breakage.
+
+### Added
+
+**filterSQP backend (§3.2)**
+- New `pympcc/_filtersqp_adapter.py` plus `BackendName` literal
+  expansion to `Literal["ipopt", "filterSQP", "scipy"]`.  Strategies
+  with dense Jacobians dispatch through the optional
+  `pyfiltersqp` extra.
+
+**Documentation (§7.4.4)**
+- New `docs/user_guide/strategy_selection.md` — TL;DR rule of thumb,
+  decision tree keyed on observable problem properties, FB-stalling
+  fallbacks, and warm-start guidance.
+- New `docs/user_guide/troubleshooting.md` — symptom-to-action map
+  for IPOPT divergence, restoration loops, biactive pairs, when to
+  use `tnlp_refine`, and a glossary of every diagnostic field on
+  `MPCCResult`.
+- New `docs/user_guide/epec.md` — the §5.5 EPEC v1 docs gap;
+  Cournot-game quickstart, `result.x` slicing recipe, derivative
+  requirements (JAX-only in v1), v1 limitations.
+- New `examples/README.md` — index of every `examples/*.py` script
+  with cross-links to user-guide pages for features documented
+  there.
+- `docs/user_guide/strategies.md` — added a full NCP-variants
+  section (`smooth_min`, `chen_chen_kanzow`, `kanzow_schwartz`,
+  `chen_mangasarian`, `billups`, `veelken_ulbrich_pow`,
+  `veelken_ulbrich_sin`) with formulas, parameter ranges, and
+  when-to-reach-for-it blurbs.
+
+**Tooling (§7.5)**
+- New `.pre-commit-config.yaml` mirroring the CI lint + type-check
+  job: `ruff check`, `ruff format`, `mypy --ignore-missing-imports`,
+  trailing-whitespace, EOF-fixer, `check-yaml`, `check-toml`.
+- New `pympcc[all]` optional-dependencies group aggregating
+  numba + jax + scipy + pyomo + pyfiltersqp.
+- New `test-all-extras` CI job exercising every optional extra in
+  one environment to catch interaction bugs.
+- Python 3.13 added to the `pyproject.toml` classifier list (the CI
+  matrix already had it).
+
+**Public API tidying (§7.4.2)**
+- `pympcc.frontend.from_nl`, `pympcc.frontend.from_pyomo`,
+  `pympcc.frontend.apply_solution`, `pympcc.frontend.PyomoMPCC`
+  re-exported at the `pympcc.frontend` namespace.
+- `pympcc.from_lower_level`, `pympcc.from_epec`, `pympcc.Leader`,
+  `pympcc.LowerLevel` re-exported at the top level.
+- `pympcc.jac_condition_number` lifted to the public surface for
+  consistency with the six other diagnostic exports.
+
+**Typing (§7.4.3)**
+- New `pympcc/_typing.py` centralising the `Literal` aliases:
+  `StrategyName`, `BackendName`, `FDMode`, `Derivatives`,
+  `InnerTolMode`.  Strategy / backend kwargs across the public API
+  now narrow to these literals instead of bare `str`.
+- Return-type annotations tightened on
+  `_diagnostics.active_sets/classify_cq/jac_norms/merit_cross_check/
+  initial_point_statistics/degeneracy_report` and
+  `sensitivity.active_row_labels`.
+
+### Changed
+
+**Multistart determinism (§7.3.2)**
+- Every parallel-path test was added: `problem.x0` immutability
+  across spawn-mode workers, bit-identical iterates across runs at
+  the same seed, identical iterates between `n_jobs=1` and
+  `n_jobs=2`.  The seed propagation via
+  `SeedSequence.spawn(n_starts)` was already shipped in 0.5.0; this
+  release locks it in with regression tests.
+- `multistart.py` documents the broad-by-design `except Exception`
+  catches; `MultiStartResult.failures` records type + message per
+  failed start.
+
+**Hot-path callbacks (§7.1)**
+- `ncp.py` dense-Jacobian path: pre-allocated `(m, n)` output buffer
+  at strategy construction; per-call writes block-rows in-place.
+  Replaces a `np.vstack` allocation per IPOPT iteration.
+- `scholtes.py` and `lin_fukushima.py` cleanup-Hessian wrappers:
+  pre-allocate the zero-padded Lagrangian buffer; per-call slice-write
+  `lam_cu` into it.  Replaces a `np.concatenate` per cleanup IPOPT
+  iteration.
+- `_tnlp.py` multiplier rescaling: dropped redundant
+  `np.asarray(p.comp_G_scale, dtype=float)` rewrap — scale arrays
+  are canonicalised at `MPCCProblem.__post_init__`.
+
+**Internal exception handling (§7.2.7)**
+- `sensitivity.py:_build_hessian` failure path: tightened from bare
+  `except Exception:` to a narrow tuple
+  `(ArithmeticError, AttributeError, TypeError, ValueError,
+  RuntimeError, np.linalg.LinAlgError)` plus a `logger.debug`
+  emit so previously-silent fallbacks now surface in debug logs.
+- Same tightening in `_base.py:_maybe_run_cleanup`.
+
+**README + docs/index.md**
+- "Six reformulation strategies" → "Thirteen reformulation
+  strategies" (six canonical + seven NCP variants), with a link to
+  the new selection guide.
+
+**`mypy` configuration (§7.4.3)**
+- Replaced the global `ignore_missing_imports = true` with
+  module-scoped overrides for cyipopt / scipy / pyomo / jax / jaxlib
+  / numba / pyfiltersqp / pandas / `pympcc.cython.*`.  User code
+  importing pympcc now benefits from full strict-typing visibility.
+
+### Internal
+
+**Centralised constants (§7.2.5)**
+- `pympcc/_constants.py` already shipped in 0.5.0; this release adds
+  `SPARSITY_TOL` and migrates ~20 remaining call sites
+  (`_diagnostics`, `_stationarity`, `_sosc`, `sensitivity`,
+  `_tnlp`, `_autodiff`, `slack`, `augmented_lagrangian`,
+  `benchmarks/macmpec`, `models`, `problem`, `_jax`).
+- Empirical-default values (`cleanup_obj_worsen_tol=1e-3`,
+  `comp_eps_ratio_theta=10.0`, `eps_hold_factor=3.0`) now have
+  one-line justifications in `_base.py`'s `SAFEGUARD_DEFAULTS` /
+  `CLEANUP_DEFAULTS`.
+
+**Strategy `__init__` deduplication (§7.2.1)**
+- `BaseStrategy._init_continuation_options(problem, ipopt_options,
+  defaults, kwargs)` is the single source of truth for the
+  merge / validate / set-attrs / safeguard / cleanup boilerplate.
+  Five strategy classes (`scholtes`, `smoothing`, `lin_fukushima`,
+  `slack`, `_SmoothNCPBase`) collapsed from a 23-line `__init__`
+  to a single line.
+
+**NCP variant deduplication (§7.2.2)**
+- New `_RegistryShim(_SmoothNCPBase)` base binds a `(phi, grad)`
+  pair from `pympcc._reformulation.NCP_REGISTRY` to the
+  `_SmoothNCPBase` ε-continuation harness via `partial(...)`.
+- The seven dedicated NCP variant classes
+  (`SmoothMinStrategy`, `ChenChenKanzowStrategy`, ...,
+  `VeelkenUlbrichSinStrategy`) demoted to ~15-line shims (down
+  from ~40-50 each).  Public string names in `_STRATEGIES` are
+  unchanged; subclass overrides + `tests/test_ncp_strategies.py`
+  unaffected.
+- Net: −139 lines in `pympcc/strategies/`.
+
+**God-module splits (§7.2.3)**
+- `pympcc/_presolve.py` (1247 → 379 LOC) split into
+  `_presolve_detect.py` (402 LOC), `_presolve_fbbt.py` (158 LOC),
+  `_presolve_reduce.py` (388 LOC).  `PresolveMap` and the public
+  `presolve()` entry point stay in `_presolve.py`; private
+  helpers re-exported for backward compat with test imports.
+- `pympcc/problem.py` (1543 → 449 LOC) split into
+  `_problem_derivatives.py` (206 LOC) and
+  `_problem_reduction.py` (972 LOC).  `MPCCProblem` dataclass +
+  `__post_init__` orchestrator + `_validate` + `_check_shape` stay.
+- `pympcc/strategies/_base.py` (1636 → 778 LOC) refactored with a
+  three-mixin composition: `_safeguards_mixin.py` /
+  `_cleanup_mixin.py` / `_continuation_mixin.py`.
+  `class BaseStrategy(SafeguardsMixin, CleanupMixin,
+  ContinuationMixin, ABC)` — every existing `self._method(...)`
+  call resolves through normal MRO; subclass overrides keep
+  working unchanged.
+
+**Time-limit enforcement (§7.3.1)**
+- Already shipped in 0.5.0; verified in this release that every
+  inner IPOPT solve receives `max_cpu_time` from the remaining
+  wall-clock budget (covers ε-continuation main loop, cleanup
+  phase, and the augmented Lagrangian outer loop).
+
+### Community files (§7.4.1)
+
+- `LICENSE`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `AUTHORS.md`
+  shipped in 0.5.0; `CONTRIBUTING.md` updated this release with the
+  pre-commit install + run flow.
+
+### Deferred (P2 polish, post-1.0)
+
+- Test directory split into `tests/unit/`, `tests/integration/`,
+  `tests/bench/` (mechanical move; would touch every test path).
+- Dedicated `examples/*.py` scripts for `smoothing`,
+  `lin_fukushima`, `augmented_lagrangian`, NCP variants, the Pyomo
+  frontend, presolve, and multistart.  The new
+  `examples/README.md` cross-links to user-guide pages where these
+  features have runnable snippets; standalone scripts are an
+  incremental win.
+
+---
+
 ## [0.5.0] - 2026-05-01
 
 ### Added

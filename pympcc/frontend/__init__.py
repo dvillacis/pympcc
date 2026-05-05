@@ -12,5 +12,14 @@ Currently provides:
 """
 
 from . import ampl, pyomo
+from .ampl import from_nl
+from .pyomo import PyomoMPCC, apply_solution, from_pyomo
 
-__all__ = ["ampl", "pyomo"]
+__all__ = [
+    "ampl",
+    "pyomo",
+    "from_nl",
+    "from_pyomo",
+    "apply_solution",
+    "PyomoMPCC",
+]

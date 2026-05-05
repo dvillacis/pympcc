@@ -133,6 +133,41 @@ class TestParallelEquivalence:
 # Result ordering                                                           #
 # ======================================================================= #
 
+class TestDeterminismParallel:
+    def test_x0_unchanged_after_parallel_call(self):
+        # The parent must not mutate problem.x0 when fanning out to workers.
+        # Each worker shallow-copies the problem before overwriting x0.
+        p = _picklable_problem(x0=np.array([0.42, 0.31]))
+        original = p.x0.copy()
+        multistart(p, n_starts=3, perturb_scale=0.4, seed=0, n_jobs=2)
+        np.testing.assert_array_equal(p.x0, original)
+
+    def test_seed_determinism_parallel(self):
+        # Same (seed, n_starts, n_jobs) must yield bit-identical iterates
+        # across two independent multistart invocations, regardless of
+        # worker completion order.  The per-start worker_seeds derive from
+        # SeedSequence(seed).spawn(n_starts) so they're stable.
+        p1 = _picklable_problem()
+        p2 = _picklable_problem()
+        ms1 = multistart(p1, n_starts=4, perturb_scale=0.5, seed=42, n_jobs=2)
+        ms2 = multistart(p2, n_starts=4, perturb_scale=0.5, seed=42, n_jobs=2)
+        for r1, r2 in zip(ms1.runs, ms2.runs):
+            np.testing.assert_allclose(r1.x, r2.x, rtol=1e-8, atol=1e-10)
+
+    def test_seed_determinism_matches_sequential(self):
+        # The choice of n_jobs (1 vs >1) must not change the per-start
+        # iterate.  Cross-checks that worker_seed plumbing is identical
+        # on the sequential and parallel paths.
+        p_seq = _picklable_problem()
+        p_par = _picklable_problem()
+        ms_seq = multistart(p_seq, n_starts=4, perturb_scale=0.5,
+                            seed=7, n_jobs=1)
+        ms_par = multistart(p_par, n_starts=4, perturb_scale=0.5,
+                            seed=7, n_jobs=2)
+        for r_s, r_p in zip(ms_seq.runs, ms_par.runs):
+            np.testing.assert_allclose(r_s.x, r_p.x, rtol=1e-8, atol=1e-10)
+
+
 class TestOrdering:
     def test_runs_in_start_order(self):
         # The k=0 start uses x0 verbatim; perturbed starts come after.

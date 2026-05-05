@@ -94,41 +94,28 @@ class ScholtesStrategy(BaseStrategy):
         p = self.problem
         base_hess = p.lagrangian_hessian
         base_sp = p.lagrangian_hessian_sparsity
-        # Zero pad allocated once and captured by closure; treated as
-        # read-only by the user's lagrangian_hessian.
-        pad_zeros = np.zeros(p.n_comp)
+        # Pre-allocated zero-padded Lagrangian buffer, captured by closure.
+        # The cleanup NLP has the same Lagrangian dimension minus the n_c
+        # ε-relaxed comp constraint rows, which the original Hessian
+        # callable expected to receive as zeros.  Allocating once and
+        # writing the leading slice in-place avoids a fresh
+        # np.concatenate every IPOPT iteration of the cleanup solve.
+        # The user's ``lagrangian_hessian`` callable must treat its
+        # ``lam`` argument as read-only (cyipopt's contract).
+        n_lam_cu = p.n_eq + p.n_ineq + 2 * p.n_comp
+        lam_full_buf = np.zeros(n_lam_cu + p.n_comp)
+        n_lam_cu_off = n_lam_cu
 
         def cleanup_hess(x, lam_cu, obj_factor,
-                         _base=base_hess, _pad_zeros=pad_zeros):
-            lam_full = np.concatenate([np.asarray(lam_cu), _pad_zeros])
-            return _base(x, lam_full, obj_factor)
+                         _base=base_hess, _buf=lam_full_buf,
+                         _off=n_lam_cu_off):
+            _buf[:_off] = lam_cu
+            return _base(x, _buf, obj_factor)
 
         return cleanup_hess, base_sp
 
     def __init__(self, problem, ipopt_options: dict, **kwargs) -> None:
-        super().__init__(problem, ipopt_options,
-                         backend=kwargs.pop("backend", "ipopt"),
-                         solver_options=kwargs.pop("solver_options", None),
-                         callback=kwargs.pop("callback", None),
-                         inner_callback=kwargs.pop("inner_callback", None),
-                         time_limit=kwargs.pop("time_limit", None))
-        opts = {**_DEFAULTS, **kwargs}
-        opts = self._maybe_resolve_auto_epsilon_0(opts)
-        self._validate_continuation_options(
-            epsilon_0=opts["epsilon_0"],
-            reduction=opts["reduction"],
-            max_iter=opts["max_iter"],
-            epsilon_min=opts["epsilon_min"],
-            comp_tol=opts["comp_tol"],
-        )
-        self.epsilon_0: float = opts["epsilon_0"]
-        self.reduction: float = opts["reduction"]
-        self.max_iter: int = opts["max_iter"]
-        self.epsilon_min: float = opts["epsilon_min"]
-        self.dual_warmstart: bool = bool(opts["dual_warmstart"])
-        self.comp_tol: float | None = opts["comp_tol"]
-        self._init_safeguards(opts)
-        self._init_cleanup(opts, user_kwargs=kwargs)
+        self._init_continuation_options(problem, ipopt_options, _DEFAULTS, kwargs)
 
     def solve(self) -> MPCCResult:
         p = self.problem

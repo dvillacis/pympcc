@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
+from ._constants import BIACTIVE_TOL as _BIACTIVE_TOL
 from ._constants import BIACTIVE_TOL_FLOOR
 
 if TYPE_CHECKING:
@@ -107,7 +108,7 @@ def _classify_tnlp_stationarity(
     I_G_active: np.ndarray,
     I_H_active: np.ndarray,
     *,
-    tol: float = 1e-6,
+    tol: float = _BIACTIVE_TOL,
 ) -> tuple[str, int]:
     """Stationarity classification for a TNLP result.
 
@@ -139,7 +140,7 @@ def _flip_wrong_pairs(
     I_G_active: np.ndarray,
     I_H_active: np.ndarray,
     *,
-    tol: float = 1e-6,
+    tol: float = _BIACTIVE_TOL,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Swap pairs whose equality-side multiplier is negative.
 
@@ -165,7 +166,7 @@ def _infer_active_set(
     mpcc_mult_G: Optional[np.ndarray],
     mpcc_mult_H: Optional[np.ndarray],
     *,
-    tol: float = 1e-6,
+    tol: float = _BIACTIVE_TOL,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Partition comp pairs into G-pinned and H-pinned index arrays.
 
@@ -342,8 +343,10 @@ def run_tnlp_refinement(
                 m_eq = lam[n_g : n_g + n_h]
             mG = lam[n_g + n_h : n_g + n_h + n_c].copy()
             mH = lam[n_g + n_h + n_c : n_g + n_h + 2 * n_c].copy()
-        mG_orig = mG * np.asarray(p.comp_G_scale, dtype=float) if p.comp_G_scale is not None else mG
-        mH_orig = mH * np.asarray(p.comp_H_scale, dtype=float) if p.comp_H_scale is not None else mH
+        # comp_G_scale / comp_H_scale are canonicalised to float64 ndarray
+        # in MPCCProblem.__post_init__ — multiply directly, no rewrap.
+        mG_orig = mG * p.comp_G_scale if p.comp_G_scale is not None else mG
+        mH_orig = mH * p.comp_H_scale if p.comp_H_scale is not None else mH
         return raw, m_ineq, m_eq, mG_orig, mH_orig
 
     def _kkt(x_sol, info, mG_orig, mH_orig):

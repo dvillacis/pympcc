@@ -1,0 +1,47 @@
+# Pre-commit hooks for pympcc.
+#
+# Install:
+#     uv tool install pre-commit
+#     pre-commit install
+#
+# Run on the full repo:
+#     pre-commit run --all-files
+#
+# Mirrors the lint + type-check job in `.github/workflows/tests.yml`
+# so contributors get the same feedback locally before pushing.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      # Match the CI invocation: `ruff check pympcc/`.
+      - id: ruff
+        args: [pympcc/]
+        pass_filenames: false
+      # Format only — does not touch test files yet (no enforcement
+      # in CI).  Drop `pympcc/` from `args` when test-formatting is
+      # added to CI to widen the hook.
+      - id: ruff-format
+        args: [pympcc/]
+        pass_filenames: false
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      - id: mypy
+        # Match the CI invocation: `mypy pympcc/ --ignore-missing-imports`.
+        # The CI version pulls numpy in for stub resolution; the
+        # additional_dependencies block below mirrors that.
+        files: ^pympcc/
+        additional_dependencies:
+          - numpy>=1.24
+        args: [--ignore-missing-imports]

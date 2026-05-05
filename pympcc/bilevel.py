@@ -31,11 +31,12 @@ as a non-negative slice of ``z`` and the complementarity row ``H_i`` is
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 import numpy as np
 
+from ._typing import Derivatives
 from .problem import MPCCProblem
 
 __all__ = ["from_lower_level", "Leader", "LowerLevel", "from_epec"]
@@ -53,7 +54,7 @@ def from_lower_level(
     g_lower: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = None,
     n_h_lower: int = 0,
     h_lower: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = None,
-    derivatives: str = "jax",
+    derivatives: Derivatives = "jax",
     xl: Optional[np.ndarray] = None,
     xu: Optional[np.ndarray] = None,
     yl: Optional[np.ndarray] = None,
@@ -355,7 +356,7 @@ def from_epec(
     *,
     leaders: list[Leader],
     common_lower: LowerLevel,
-    derivatives: str = "jax",
+    derivatives: Derivatives = "jax",
 ) -> MPCCProblem:
     r"""Emit an :class:`MPCCProblem` from a multi-leader-common-follower EPEC.
 

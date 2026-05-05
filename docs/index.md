@@ -25,11 +25,14 @@ quickstart
 :caption: User guide
 user_guide/problem_setup
 user_guide/strategies
+user_guide/strategy_selection
+user_guide/troubleshooting
 user_guide/diagnostics
 user_guide/sparse_and_slack
 user_guide/sensitivity
 user_guide/autodiff
 user_guide/bilevel
+user_guide/epec
 user_guide/presolve_multistart
 user_guide/ampl_io
 ```
@@ -55,7 +58,7 @@ changelog
 
 ## Why pympcc
 
-- **Six reformulation strategies** — direct, Scholtes, smoothing (Fischer-Burmeister), Lin-Fukushima, augmented Lagrangian, slack lifting.
+- **Thirteen reformulation strategies** — six canonical (direct, Scholtes, smoothing, Lin-Fukushima, augmented Lagrangian, slack lifting) plus seven NCP-function variants (smooth-min, Chen-Chen-Kanzow, Kanzow-Schwartz, Chen-Mangasarian, Billups, Veelken-Ulbrich pow / sin); pick one with the [selection guide](user_guide/strategy_selection).
 - **Certified stationarity** — TNLP refinement extracts MPCC-clean multipliers and classifies S- / W- / C-stationarity.
 - **Diagnostics** — MPCC-LICQ / MPCC-MFCQ check, B-stationarity certification, MPCC-SOSC, multi-merit cross-check.
 - **Differentiable** — `pympcc.solve_jax` registers the solve as `jax.custom_vjp` for end-to-end gradients through the converged optimum.

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from .._constants import BIACTIVE_TOL as _STAT_TOL
 from .._stationarity import compute_kkt_residual
 from ..result import IterationInfo, MPCCResult
 from ._base import CLEANUP_DEFAULTS, SAFEGUARD_DEFAULTS, BaseStrategy
@@ -14,8 +15,6 @@ _DEFAULTS = dict(
     epsilon_min=1e-8, dual_warmstart=True, comp_tol=None,
     **SAFEGUARD_DEFAULTS, **CLEANUP_DEFAULTS,
 )
-
-_STAT_TOL = 1e-6   # geometric tolerance for biactive-set detection
 
 
 class SlackStrategy(BaseStrategy):
@@ -84,29 +83,7 @@ class SlackStrategy(BaseStrategy):
     _VALID_OPTIONS: frozenset = frozenset(_DEFAULTS)
 
     def __init__(self, problem, ipopt_options: dict, **kwargs) -> None:
-        super().__init__(problem, ipopt_options,
-                         backend=kwargs.pop("backend", "ipopt"),
-                         solver_options=kwargs.pop("solver_options", None),
-                         callback=kwargs.pop("callback", None),
-                         inner_callback=kwargs.pop("inner_callback", None),
-                         time_limit=kwargs.pop("time_limit", None))
-        opts = {**_DEFAULTS, **kwargs}
-        opts = self._maybe_resolve_auto_epsilon_0(opts)
-        self._validate_continuation_options(
-            epsilon_0=opts["epsilon_0"],
-            reduction=opts["reduction"],
-            max_iter=opts["max_iter"],
-            epsilon_min=opts["epsilon_min"],
-            comp_tol=opts["comp_tol"],
-        )
-        self.epsilon_0: float = opts["epsilon_0"]
-        self.reduction: float = opts["reduction"]
-        self.max_iter: int = opts["max_iter"]
-        self.epsilon_min: float = opts["epsilon_min"]
-        self.dual_warmstart: bool = bool(opts["dual_warmstart"])
-        self.comp_tol: float | None = opts["comp_tol"]
-        self._init_safeguards(opts)
-        self._init_cleanup(opts, user_kwargs=kwargs)
+        self._init_continuation_options(problem, ipopt_options, _DEFAULTS, kwargs)
 
     # ------------------------------------------------------------------ #
     # Lifted-space helpers                                                 #

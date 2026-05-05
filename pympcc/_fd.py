@@ -15,19 +15,20 @@ and are safe to call from multiple threads simultaneously.
 """
 from __future__ import annotations
 
-from typing import Callable, Literal
+from typing import Callable
 
 import numpy as np
 
+from ._typing import FDMode
+
 _DEFAULT_H: float = float(np.sqrt(np.finfo(float).eps))  # ≈ 1.4901e-8
-FDMode = Literal["forward", "central"]
 
 
 def fd_gradient(
     f: Callable[[np.ndarray], float],
     n: int,
     h: float = _DEFAULT_H,
-    mode: str = "forward",
+    mode: FDMode = "forward",
 ) -> Callable[[np.ndarray], np.ndarray]:
     """
     Return a callable ``x → (n,)`` that approximates the gradient of ``f``
@@ -74,7 +75,7 @@ def fd_jacobian(
     n_out: int,
     n: int,
     h: float = _DEFAULT_H,
-    mode: str = "forward",
+    mode: FDMode = "forward",
 ) -> Callable[[np.ndarray], np.ndarray]:
     """
     Return a callable ``x → (n_out, n)`` that approximates the Jacobian of

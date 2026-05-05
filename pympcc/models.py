@@ -35,6 +35,8 @@ from typing import Callable, Optional, Union
 
 import numpy as np
 
+from ._constants import SPARSITY_TOL as _SPARSITY_TOL
+from ._typing import FDMode
 from .problem import MPCCProblem
 
 __all__ = ["StructuredMPCC"]
@@ -193,13 +195,13 @@ class StructuredMPCC:
     # Finite-difference options                                            #
     # ------------------------------------------------------------------ #
     fd_h: float = float(np.sqrt(np.finfo(float).eps))
-    fd_mode: str = "forward"
+    fd_mode: FDMode = "forward"
 
     # ------------------------------------------------------------------ #
     # JAX autodiff options                                                 #
     # ------------------------------------------------------------------ #
     use_jax_hessian: bool = False
-    jax_sparsity_tol: float = 1e-12
+    jax_sparsity_tol: float = _SPARSITY_TOL
 
     # ------------------------------------------------------------------ #
 

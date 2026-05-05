@@ -6,7 +6,7 @@
 
 A Python solver for **Mathematical Programs with Complementarity Constraints (MPCC)** using [IPOPT](https://github.com/coin-or/Ipopt) via [cyipopt](https://github.com/mechmotum/cyipopt), with an optional SciPy backend.
 
-> Six reformulation strategies, certified MPCC multipliers, B-stationarity / SOSC diagnostics, parametric sensitivity, and a `jax.custom_vjp`-registered solve for end-to-end differentiability.
+> Thirteen reformulation strategies (six canonical + seven NCP variants), certified MPCC multipliers, B-stationarity / SOSC diagnostics, parametric sensitivity, and a `jax.custom_vjp`-registered solve for end-to-end differentiability.  See [strategy selection](https://pympcc.readthedocs.io/en/latest/user_guide/strategy_selection.html) for help picking one.
 
 ## Problem form
 
@@ -90,7 +90,7 @@ Full user guide, API reference, and theory primer at **[pympcc.readthedocs.io](h
 uv run pytest tests/ -v
 ```
 
-The suite covers all six strategies, all diagnostic modules, the MacMPEC benchmark collection, sensitivity, and `solve_jax`. The `direct` strategy tests are marked `xfail(strict=False)` because LICQ generically fails at MPCC feasible points.
+The suite covers all thirteen strategies, all diagnostic modules, the MacMPEC benchmark collection, sensitivity, and `solve_jax`. The `direct` strategy tests are marked `xfail(strict=False)` because LICQ generically fails at MPCC feasible points.
 
 ## Acknowledgements
 

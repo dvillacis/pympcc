@@ -294,6 +294,10 @@ def _run_sequential(problem, starts, solve_kwargs):
         try:
             runs.append(_solve(local_problem, **solve_kwargs))
         except Exception as exc:
+            # Broad by design: a multistart's contract is to fault-isolate
+            # arbitrary per-start failures (user-callable exceptions,
+            # cyipopt/JAX/scipy errors, ...) so one bad start cannot abort
+            # the whole sweep.  Type + message are captured on the result.
             _log.debug("multistart: start %d failed, %s: %s",
                        k, type(exc).__name__, exc)
             failures.append((k, type(exc).__name__, str(exc)))
@@ -327,6 +331,9 @@ def _run_parallel(problem, starts, workers, solve_kwargs, worker_seeds):
             try:
                 runs.append((k, fut.result()))
             except Exception as exc:
+                # Broad by design — see _run_sequential for rationale.
+                # Worker-side exceptions are unpickled here as either the
+                # original type or BrokenProcessPool / pickling errors.
                 _log.debug("multistart: start %d failed in worker, %s: %s",
                            k, type(exc).__name__, exc)
                 failures.append((k, type(exc).__name__, str(exc)))

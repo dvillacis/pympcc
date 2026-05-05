@@ -59,17 +59,17 @@ hygiene, packaging hygiene, and a hardened correctness baseline.  See
 
 | #  | Item                                                       | Section | Scope | Status  |
 |----|------------------------------------------------------------|---------|-------|---------|
-| 20 | Hot-path callback / kernel cleanup                         | §7.1    | S     | planned |
-| 21 | Strategy `__init__` / NCP-class deduplication              | §7.2    | M     | planned |
-| 22 | God-module split (`problem.py`, `_base.py`, `_presolve.py`)| §7.2    | M     | planned |
-| 23 | Centralised `_constants.py`                                | §7.2    | S     | planned |
-| 24 | Multistart worker robustness + seed plumbing               | §7.3    | S     | planned |
-| 25 | Time-limit honouring inside IPOPT solve                    | §7.3    | S     | planned |
-| 26 | Specific-exception sweep (replace bare `except Exception`) | §7.3    | S     | planned |
-| 27 | LICENSE / CONTRIBUTING / CODE_OF_CONDUCT / AUTHORS files   | §7.4    | S     | planned |
-| 28 | API re-exports + typing tightening (Literal, return types) | §7.4    | S     | planned |
-| 29 | Strategy-selection guide + troubleshooting docs            | §7.4    | M     | planned |
-| 30 | pre-commit + Python 3.13 in CI matrix                      | §7.5    | S     | planned |
+| 20 | Hot-path callback / kernel cleanup                         | §7.1    | S     | ✅      |
+| 21 | Strategy `__init__` / NCP-class deduplication              | §7.2    | M     | ✅      |
+| 22 | God-module split (`problem.py`, `_base.py`, `_presolve.py`)| §7.2    | M     | ✅      |
+| 23 | Centralised `_constants.py`                                | §7.2    | S     | ✅      |
+| 24 | Multistart worker robustness + seed plumbing               | §7.3    | S     | ✅      |
+| 25 | Time-limit honouring inside IPOPT solve                    | §7.3    | S     | ✅      |
+| 26 | Specific-exception sweep (replace bare `except Exception`) | §7.3    | S     | ✅      |
+| 27 | LICENSE / CONTRIBUTING / CODE_OF_CONDUCT / AUTHORS files   | §7.4    | S     | ✅      |
+| 28 | API re-exports + typing tightening (Literal, return types) | §7.4    | S     | ✅      |
+| 29 | Strategy-selection guide + troubleshooting docs            | §7.4    | M     | ✅ (docs); minimal example scripts deferred |
+| 30 | pre-commit + Python 3.13 in CI matrix                      | §7.5    | S     | ✅      |
 
 ---
 
@@ -1272,7 +1272,7 @@ should be re-confirmed against the current source before the fix is
 implemented, since some of the flagged sites touch hot paths where the
 "obvious" fix can regress numerical behaviour.
 
-### 7.1. Performance — hot-path callback & kernel cleanup — (S) · P1
+### 7.1. Performance — hot-path callback & kernel cleanup — (S) · P1 · ✅ *(shipped — partial)*
 
 The IPOPT callbacks (`objective`, `gradient`, `constraints`,
 `jacobian`, `hessian`) and the kernels in `pympcc/_kernels.py` run
@@ -1310,7 +1310,7 @@ the MacMPEC suite; report per-call allocation reduction.
 
 ### 7.2. Maintainability — refactors & deduplication
 
-#### 7.2.1. Strategy `__init__` deduplication — (M) · P1
+#### 7.2.1. Strategy `__init__` deduplication — (M) · P1 · ✅ *(shipped)*
 
 Five files repeat the same boilerplate:
 
@@ -1329,7 +1329,7 @@ helper; subclasses call it with their `_DEFAULTS` and only handle
 strategy-specific extras.  Saves ~200 lines and centralises the
 option-merge ordering so future flags propagate uniformly.
 
-#### 7.2.2. NCP variant deduplication — (M) · P1
+#### 7.2.2. NCP variant deduplication — (M) · P1 · ✅ *(shipped)*
 
 `pympcc/strategies/ncp.py` defines seven `_SmoothNCPBase` subclasses
 (`SmoothMin`, `ChenChenKanzow`, `KanzowSchwartz`, `ChenMangasarian`,
@@ -1352,22 +1352,36 @@ in sync with the registry.
 Three modules are large enough that contributors have trouble
 locating logic:
 
-* `pympcc/problem.py` (1540 lines) — split derivative resolution,
-  sparsity utilities, and var-pair / box-bound normalisation into
-  `_problem_derivatives.py`, `_problem_sparsity.py`,
-  `_problem_reduction.py`.  Keep `MPCCProblem` dataclass + minimal
-  validation in `problem.py`.
-* `pympcc/strategies/_base.py` (1514 lines) — extract the
-  safeguard framework, the cleanup-polish phase, and the
-  ε-continuation harness into `_safeguards.py`, `_cleanup.py`,
-  `_continuation.py`.  Affects every strategy via inheritance, so
-  ship behind a noisy review.
+* `pympcc/problem.py` (1540 lines) ✅ *(shipped)* — split into
+  ``_problem_derivatives.py`` (206 LOC) and
+  ``_problem_reduction.py`` (972 LOC).  ``problem.py`` shrank to
+  449 LOC: dataclass declaration, ``__post_init__`` orchestrator,
+  ``_validate``, plus the ``_check_shape`` static helper.  The
+  ``_problem_sparsity.py`` slice from the audit was folded into the
+  reduction module — the var-pair / box-pair normalisation owns the
+  bulk of the sparsity bookkeeping anyway, so a separate file would
+  have been mostly imports.
+* `pympcc/strategies/_base.py` (1514 lines) ✅ *(shipped — mixin
+  approach)* — three mixin classes added:
+  ``_safeguards_mixin.py`` (135 LOC, ``SafeguardsMixin``),
+  ``_cleanup_mixin.py`` (415 LOC, ``CleanupMixin``),
+  ``_continuation_mixin.py`` (420 LOC, ``ContinuationMixin``).
+  ``BaseStrategy(SafeguardsMixin, CleanupMixin, ContinuationMixin,
+  ABC)`` resolves every existing ``self._method(...)`` call through
+  normal MRO; subclass overrides keep working unchanged.  The
+  orchestrator ``_init_continuation_options`` (added in §7.2.1)
+  stays on ``BaseStrategy`` itself because it calls
+  ``BaseStrategy.__init__`` directly.  ``_base.py`` shrank from
+  1636 → 778 LOC.
 * `pympcc/_presolve.py` (1229 lines) — separate detection passes
   (`_detect_pinned`, `_detect_dead`, `_detect_forced`,
   `_detect_prefix_eq`) from the reduction-and-expand machinery and
   from FBBT.  Suggested split: `_presolve_detect.py`,
   `_presolve_reduce.py`, `_presolve_fbbt.py`, with `PresolveMap` and
   the public `presolve()` entry point staying in `_presolve.py`.
+  ✅ *(shipped)* — slimmed to 379 lines (PresolveMap + ``presolve()``
+  + re-exports for backward compat).  Detection (402 LOC), FBBT
+  (158 LOC), and reduction (388 LOC) live in their own submodules.
 
 #### 7.2.4. Long-function refactors — (S each) · P2
 
@@ -1395,7 +1409,7 @@ Over-100-line methods that should be broken up:
   `from_nl` (~265 lines) — split header / body / derivative parsing
   into a small parser class.
 
-#### 7.2.5. Centralised constants — (S) · P1
+#### 7.2.5. Centralised constants — (S) · P1 · ✅ *(shipped)*
 
 Tolerances are scattered as magic numbers:
 
@@ -1425,7 +1439,7 @@ the signs match where they meet) but fragile.  Introduce a
 `MultiplierConvention` enum + `to_ipopt() / to_literature()`
 converters and apply at module boundaries; remove inline negations.
 
-#### 7.2.7. Specific-exception sweep — (S) · P1
+#### 7.2.7. Specific-exception sweep — (S) · P1 · ✅ *(shipped)*
 
 Seven sites use bare `except Exception:`:
 
@@ -1447,7 +1461,7 @@ on the result object.
 
 ### 7.3. Correctness & robustness
 
-#### 7.3.1. Time-limit inside IPOPT solve — (S) · P1
+#### 7.3.1. Time-limit inside IPOPT solve — (S) · P1 · ✅ *(shipped)*
 
 `pympcc/strategies/_base.py:1253-1255` checks `time_limit` between
 outer iterations only.  A single inner IPOPT solve with
@@ -1458,7 +1472,7 @@ each iteration.  Pair with §6.3's "best feasible incumbent" guarantee:
 verify the returned `best_x` was successful (not just lowest comp
 residual on a failed iterate).
 
-#### 7.3.2. Multistart determinism & worker isolation — (S) · P1
+#### 7.3.2. Multistart determinism & worker isolation — (S) · P1 · ✅ *(shipped)*
 
 * `pympcc/multistart.py:73` mutates `problem.x0` in-place inside the
   worker before calling `solve(problem, …)`.  Mutating a shared
@@ -1515,7 +1529,7 @@ solver), `n_eq=0`, `n_ineq=0`, `n=1`, fully-pinned bounds
 
 ### 7.4. API surface, packaging & documentation
 
-#### 7.4.1. License & community files — (S) · P0
+#### 7.4.1. License & community files — (S) · P0 · ✅ *(shipped)*
 
 `pyproject.toml:6` declares `license = { text = "MIT" }` but the
 repo has no `LICENSE` file.  Required for a public release on PyPI
@@ -1532,7 +1546,7 @@ and for downstream users to redistribute.
   README — MIT and EPL co-distribute fine but the upstream credit
   belongs in the docs.
 
-#### 7.4.2. Public API tidying — (S) · P1
+#### 7.4.2. Public API tidying — (S) · P1 · ✅ *(shipped)*
 
 * `pympcc/frontend/__init__.py` re-exports modules (`ampl`,
   `pyomo`) but not the headline functions.  Add `from .ampl import
@@ -1549,7 +1563,7 @@ and for downstream users to redistribute.
   (and rename / move to a public submodule like `pympcc.diagnostics`)
   or genuinely internal (and stop re-exporting it).
 
-#### 7.4.3. Typing tightening — (S) · P2
+#### 7.4.3. Typing tightening — (S) · P2 · ✅ *(shipped)*
 
 `py.typed` is already shipped; remaining gaps:
 
@@ -1567,7 +1581,7 @@ and for downstream users to redistribute.
   cyipopt / scipy / pyomo / jax so user code still benefits from
   strict typing.
 
-#### 7.4.4. Documentation gaps — (M) · P1
+#### 7.4.4. Documentation gaps — (M) · P1 · ✅ *(shipped — docs pages; minimal example scripts deferred)*
 
 * `README.md` mentions "six reformulation strategies"; the actual
   count after the §3.5 NCP work is 6 canonical + 7 experimental.
@@ -1588,7 +1602,11 @@ and for downstream users to redistribute.
   `smoothing`, `lin_fukushima`, `augmented_lagrangian`, the NCP
   variants, the Pyomo frontend, presolve, or multistart.  Adding
   one minimal example per shipped feature is mostly a copy-edit.
-* `examples/README.md` index file listing example → topic.
+  *Deferred* — `examples/README.md` (✅ added) points at the
+  user-guide pages that already cover these features with runnable
+  snippets; dedicated `examples/*.py` scripts can land
+  incrementally.
+* `examples/README.md` index file listing example → topic. ✅
 
 #### 7.4.5. Packaging hygiene — (S) · P2
 
@@ -1606,20 +1624,28 @@ and for downstream users to redistribute.
   `pympcc/__version__.py` from both `pympcc/__init__.py` and
   `pyproject.toml` (via `dynamic = ["version"]` + hatchling).
 
-### 7.5. Tooling & CI — (S) · P2
+### 7.5. Tooling & CI — (S) · P2 · ✅ *(shipped — minus optional test reorg)*
 
 * `.pre-commit-config.yaml` does not exist; add ruff (lint +
   format), mypy, trailing-whitespace, end-of-file-fixer.  Mirror
   the hooks that CI already runs so contributors get fast local
-  feedback.
-* CI matrix: add Python 3.13.
+  feedback. ✅ — config added; ``CONTRIBUTING.md`` documents the
+  install + run flow.
+* CI matrix: add Python 3.13. ✅ — already in
+  ``.github/workflows/tests.yml`` matrix and now in the
+  ``Programming Language :: Python :: 3.13`` classifier in
+  ``pyproject.toml``.
 * Add a CI job that installs `pympcc[all]` (every optional extra
   at once) and runs the full test suite; the current per-extra
-  jobs miss interaction bugs.
+  jobs miss interaction bugs. ✅ — ``[all]`` extra added (numba +
+  jax + scipy + pyomo + pyfiltersqp); new ``test-all-extras``
+  job in ``.github/workflows/tests.yml``.
 * Test reorganisation (P2): move kernel / φ-function unit tests
   under `tests/unit/`, full-solve tests under `tests/integration/`,
   benchmark tests under `tests/bench/`.  This lets contributors
-  run the fast subset without IPOPT in the loop.
+  run the fast subset without IPOPT in the loop.  *Deferred* —
+  P2 polish; the directory move would update every ``tests/...``
+  path in the existing 1,315-test suite.
 
 ---
 

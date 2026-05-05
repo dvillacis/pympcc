@@ -29,6 +29,8 @@ from typing import Callable
 
 import numpy as np
 
+from ._constants import SPARSITY_TOL as _SPARSITY_TOL
+
 try:
     import jax
     import jax.numpy as jnp
@@ -46,7 +48,7 @@ def jax_gradient(
     f: Callable,
     n: int,
     x0: np.ndarray,
-    tol: float = 1e-12,
+    tol: float = _SPARSITY_TOL,
 ) -> Callable[[np.ndarray], np.ndarray]:
     """
     Return a JIT-compiled gradient callable using ``jax.grad``.
@@ -85,7 +87,7 @@ def jax_jacobian(
     n_out: int,
     n: int,
     x0: np.ndarray,
-    tol: float = 1e-12,
+    tol: float = _SPARSITY_TOL,
 ) -> tuple[Callable[[np.ndarray], np.ndarray], tuple[np.ndarray, np.ndarray]]:
     """
     Return a sparse-native Jacobian callable and its auto-detected COO pattern.
@@ -148,7 +150,7 @@ def jax_jacobian_dense(
     n_out: int,
     n: int,
     x0: np.ndarray,
-    tol: float = 1e-12,
+    tol: float = _SPARSITY_TOL,
 ) -> Callable[[np.ndarray], np.ndarray]:
     """
     Return a JIT-compiled dense Jacobian callable using ``jax.jacfwd``.
@@ -191,7 +193,7 @@ def jax_hessian_lagrangian(
     n: int,
     x0: np.ndarray,
     m: int,
-    tol: float = 1e-12,
+    tol: float = _SPARSITY_TOL,
 ) -> tuple[Callable, tuple[np.ndarray, np.ndarray]]:
     """
     Return a sparse lower-triangular Lagrangian Hessian callable and its pattern.

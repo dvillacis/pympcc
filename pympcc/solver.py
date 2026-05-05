@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from typing import Callable, Literal, Optional, Union
+from typing import Callable, Optional, Union
 
 import numpy as np
 
@@ -41,7 +41,8 @@ from .strategies.smoothing import SmoothingStrategy
 
 __all__ = ["MPCCSolver", "solve"]
 
-BackendName = Literal["ipopt", "filterSQP", "scipy"]
+from ._typing import BackendName, StrategyName
+
 ProblemLike = Union[MPCCProblem, StructuredMPCC]
 
 
@@ -86,15 +87,6 @@ def _problem_signature(problem: MPCCProblem) -> tuple:
         _sp_sig(problem.eq_jacobian_sparsity),
         _sp_sig(problem.ineq_jacobian_sparsity),
     )
-
-StrategyName = Literal[
-    "direct", "scholtes", "smoothing", "lin_fukushima",
-    "augmented_lagrangian", "slack",
-    "smooth_min", "chen_chen_kanzow", "kanzow_schwartz",
-    "chen_mangasarian", "billups",
-    "veelken_ulbrich_pow", "veelken_ulbrich_sin",
-    "ncp",
-]
 
 _STRATEGIES = {
     "direct": DirectStrategy,

@@ -62,9 +62,11 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
+from ._constants import BIACTIVE_TOL as _BIACTIVE_TOL
 from ._diagnostics import _stack_active_gradient_matrix, active_sets
 from ._jax import HAS_JAX
 from ._sosc import _build_hessian
+from ._typing import StrategyName
 from .problem import MPCCProblem
 from .result import MPCCResult
 
@@ -182,7 +184,7 @@ def solve_jax(
     theta: Any,
     *,
     x0: Optional[np.ndarray] = None,
-    strategy: str = "scholtes",
+    strategy: StrategyName = "scholtes",
     **solve_kwargs,
 ):
     """Solve a parametric MPCC; returns ``x*`` differentiable in ``θ``.
@@ -300,7 +302,7 @@ def _theta_cotangent(
         return zero_theta
 
     x_star = np.asarray(result.x, dtype=float)
-    sets = active_sets(result, problem, tol=1e-6)
+    sets = active_sets(result, problem, tol=_BIACTIVE_TOL)
 
     if sets["I_00"].size > 0:
         warnings.warn(

@@ -1,6 +1,6 @@
 [project]
 name = "pympcc"
-version = "0.5.0"
+version = "0.6.0"
 description = "Python solver for Mathematical Programs with Complementarity Constraints (MPCC) using IPOPT via cyipopt"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -19,6 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Mathematics",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
@@ -53,6 +54,17 @@ docs = [
     "sphinx-autodoc-typehints>=2.0",
     "matplotlib>=3.8",
 ]
+# All optional runtime extras combined.  Used by the
+# ``tests-all-extras`` CI job to surface interaction bugs the
+# per-extra matrix would miss.  Excludes ``dev`` (test tooling)
+# and ``docs`` (Sphinx + theme).
+all = [
+    "numba>=0.57",
+    "jax>=0.4",
+    "scipy>=1.10",
+    "pyomo>=6.7",
+    "pyfiltersqp>=0.3",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -79,10 +91,19 @@ addopts = "--tb=short"
 minversion = "7.0"
 
 [tool.coverage.run]
+# Modules omitted from the basic CI coverage report.  Each requires
+# an optional extra not installed in the default test matrix; the
+# ``test-all-extras`` CI job exercises them with the relevant extra
+# present.  Including them here would otherwise drag the basic-job
+# coverage figure down to a number that misrepresents the
+# without-extras surface (no test can run them in that environment).
 omit = [
-    "pympcc/_scipy_adapter.py",
-    "pympcc/_jax.py",
-    "pympcc/benchmarks/macmpec.py",
+    "pympcc/_scipy_adapter.py",       # [scipy] extra
+    "pympcc/_jax.py",                 # [jax] extra (low-level wrapper)
+    "pympcc/_autodiff.py",            # [jax] extra (solve_jax)
+    "pympcc/_filtersqp_adapter.py",   # [filtersqp] extra
+    "pympcc/frontend/pyomo.py",       # [pyomo] extra
+    "pympcc/benchmarks/macmpec.py",   # CLI-only, exercised by hand
 ]
 
 [tool.coverage.report]
@@ -108,9 +129,37 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.11"
-ignore_missing_imports = true
 warn_unused_ignores = true
 no_implicit_reexport = false
+
+# Module-scoped overrides: only the optional / unstubbed third-party
+# packages get ``ignore_missing_imports``.  User code importing pympcc
+# still benefits from full strict-typing visibility on its own imports.
+[[tool.mypy.overrides]]
+module = [
+    "cyipopt",
+    "cyipopt.*",
+    "scipy",
+    "scipy.*",
+    "pyomo",
+    "pyomo.*",
+    "jax",
+    "jax.*",
+    "jaxlib",
+    "jaxlib.*",
+    "numba",
+    "numba.*",
+    "pyfiltersqp",
+    "pyfiltersqp.*",
+    # ``pandas`` is an optional dep used only by
+    # ``MPCCResult.to_dataframe``.  Its stubs (``pandas-stubs``) are not
+    # in the default dev set; ignore until we add them.
+    "pandas",
+    "pandas.*",
+    # Cython extension modules built at install time — no .pyi exists.
+    "pympcc.cython.*",
+]
+ignore_missing_imports = true
 
 [dependency-groups]
 dev = [

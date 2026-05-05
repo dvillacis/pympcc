@@ -30,6 +30,7 @@ from ._diagnostics import (
     classify_cq,
     degeneracy_report,
     initial_point_statistics,
+    jac_condition_number,
     jac_norms,
     merit_cross_check,
 )
@@ -41,6 +42,7 @@ from ._stationarity import (
     verify_b_stationarity,
 )
 from ._tnlp import TNLPResult
+from .bilevel import Leader, LowerLevel, from_epec, from_lower_level
 from .models import StructuredMPCC
 from .multistart import MultiStartResult, multistart
 from .problem import MPCCProblem
@@ -60,6 +62,7 @@ __all__ = [
     "classify_cq",
     "merit_cross_check",
     "jac_norms",
+    "jac_condition_number",
     "degeneracy_report",
     "initial_point_statistics",
     "sosc_check",
@@ -79,5 +82,9 @@ __all__ = [
     "ParametricMPCC",
     "solve_jax",
     "bilevel",
+    "from_lower_level",
+    "from_epec",
+    "Leader",
+    "LowerLevel",
 ]
-__version__ = "0.5.0"
+__version__ = "0.6.0"

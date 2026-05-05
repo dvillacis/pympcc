@@ -3,6 +3,12 @@ from __future__ import annotations
 
 import numpy as np
 
+from .._constants import (
+    CLEANUP_TOL_FLOOR as _CLEANUP_TOL_FLOOR,
+)
+from .._constants import (
+    IPOPT_DEFAULT_TOL as _IPOPT_DEFAULT_TOL,
+)
 from .._kernels import scatter_add as _scatter_add
 from .._stationarity import classify_stationarity, compute_kkt_residual
 from ..result import IterationInfo, MPCCResult
@@ -16,7 +22,7 @@ _DEFAULTS = dict(
     tau=10.0,
     eta=0.25,
     max_iter=20,
-    comp_tol=1e-8,
+    comp_tol=_IPOPT_DEFAULT_TOL,
     dual_warmstart=True,
     stagnation_iters=5,
     **CLEANUP_DEFAULTS,
@@ -369,8 +375,8 @@ class AugmentedLagrangianStrategy(BaseStrategy):
             _comp_for_tol = (
                 _init_comp if np.isinf(prev_comp_residual) else prev_comp_residual
             )
-            _tol_user = self.ipopt_options.get("tol", 1e-8)
-            nlp.add_option("tol", max(_tol_user, min(_comp_for_tol * 1e-2, 1e-6)))
+            _tol_user = self.ipopt_options.get("tol", _IPOPT_DEFAULT_TOL)
+            nlp.add_option("tol", max(_tol_user, min(_comp_for_tol * 1e-2, _CLEANUP_TOL_FLOOR)))
             # Bound the inner IPOPT solve by the remaining outer budget so a
             # single hard inner NLP cannot run past ``self.time_limit``.
             if self.time_limit is not None:

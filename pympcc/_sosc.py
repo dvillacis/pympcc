@@ -29,6 +29,7 @@ from typing import Optional
 
 import numpy as np
 
+from ._constants import BIACTIVE_TOL as _BIACTIVE_TOL
 from ._diagnostics import _stack_active_gradient_matrix, active_sets
 from ._stationarity import _dense_jac
 from .problem import MPCCProblem
@@ -143,7 +144,7 @@ def sosc_check(
     *,
     tol: float = 0.0,
     fd_h: Optional[float] = None,
-    active_tol: float = 1e-6,
+    active_tol: float = _BIACTIVE_TOL,
 ) -> dict:
     """Check MPCC second-order sufficient conditions at ``result.x``.
 

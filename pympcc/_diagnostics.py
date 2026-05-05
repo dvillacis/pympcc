@@ -16,11 +16,16 @@ through SVD.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
-from ._constants import ZERO_NORM_TOL as _ZERO_NORM_TOL
+from ._constants import (
+    BIACTIVE_TOL as _BIACTIVE_TOL,
+)
+from ._constants import (
+    ZERO_NORM_TOL as _ZERO_NORM_TOL,
+)
 from ._stationarity import _dense_jac
 from .problem import MPCCProblem
 from .result import MPCCResult
@@ -40,8 +45,8 @@ def active_sets(
     result: MPCCResult,
     problem: MPCCProblem,
     *,
-    tol: float = 1e-6,
-) -> dict:
+    tol: float = _BIACTIVE_TOL,
+) -> dict[str, np.ndarray]:
     """Partition constraint indices into active subsets at ``result.x``.
 
     Returns a dict with the integer index arrays:
@@ -237,9 +242,9 @@ def classify_cq(
     result: MPCCResult,
     problem: MPCCProblem,
     *,
-    tol: float = 1e-6,
+    tol: float = _BIACTIVE_TOL,
     lp_tol: float = 1e-8,
-) -> dict:
+) -> dict[str, Any]:
     """Classify the strongest MPCC constraint qualification at ``result.x``.
 
     The chain tested (strongest first):
@@ -340,7 +345,7 @@ def jac_condition_number(
     result: MPCCResult,
     problem: MPCCProblem,
     *,
-    tol: float = 1e-6,
+    tol: float = _BIACTIVE_TOL,
 ) -> Optional[float]:
     """Condition number κ₂(M_active) of the active-constraint Jacobian.
 
@@ -377,7 +382,7 @@ def _fischer_burmeister(G: np.ndarray, H: np.ndarray) -> np.ndarray:
 def merit_cross_check(
     result: MPCCResult,
     problem: MPCCProblem,
-) -> dict:
+) -> dict[str, float]:
     """Cross-check three independent MPCC merit functions at ``result.x``.
 
     Disagreement between merits localises numerical trouble: one merit
@@ -428,9 +433,9 @@ def jac_norms(
     result: MPCCResult,
     problem: MPCCProblem,
     *,
-    tol: float = 1e-6,
+    tol: float = _BIACTIVE_TOL,
     zero_tol: float = _ZERO_NORM_TOL,
-) -> dict:
+) -> dict[str, Any]:
     """Row- and column-norm summary of the active-constraint Jacobian.
 
     Builds the same active-gradient stack used by :func:`classify_cq`
@@ -446,13 +451,15 @@ def jac_norms(
     Returns
     -------
     dict
-        ``{
-            "row": {"max": …, "min": …, "n_zero": …, "n_rows": …},
-            "col": {"max": …, "min": …, "n_zero": …, "n_cols": …},
-        }``
+        Schema::
 
-    Returns empty dicts under each key when the active matrix is empty
-    or the result did not converge.
+            {
+                "row": {"max": ..., "min": ..., "n_zero": ..., "n_rows": ...},
+                "col": {"max": ..., "min": ..., "n_zero": ..., "n_cols": ...},
+            }
+
+        Each inner dict carries empty values (``None`` / ``0``) when the
+        active matrix is empty or the result did not converge.
     """
     empty = {
         "row": {"max": None, "min": None, "n_zero": 0, "n_rows": 0},
@@ -483,7 +490,7 @@ def jac_norms(
     }
 
 
-def initial_point_statistics(problem: MPCCProblem) -> dict:
+def initial_point_statistics(problem: MPCCProblem) -> dict[str, Any]:
     """Replicate PATH's ``output_initial_point_statistics`` at ``x0``.
 
     Reports residuals at the user's starting point so the user sees the
@@ -532,9 +539,9 @@ def degeneracy_report(
     result: MPCCResult,
     problem: MPCCProblem,
     *,
-    tol: float = 1e-6,
+    tol: float = _BIACTIVE_TOL,
     zero_tol: float = _ZERO_NORM_TOL,
-) -> dict:
+) -> dict[str, Any]:
     """Combined degeneracy summary at ``result.x``.
 
     Aggregates signals already produced by :func:`active_sets`,
@@ -544,12 +551,14 @@ def degeneracy_report(
     Returns
     -------
     dict
-        ``n_biactive`` — biactive-pair count |I_00|.
-        ``n_zero_rows`` — rows of the active Jacobian at norm ≤ zero_tol.
-        ``n_zero_cols`` — columns at norm ≤ zero_tol.
-        ``min_singular_value`` — smallest singular value of the active
-        Jacobian (None when active matrix is empty / not converged).
-        ``merit_disagreement_ratio`` — see :func:`merit_cross_check`.
+        Result dict with keys:
+
+        - ``n_biactive`` — biactive-pair count ``|I_00|``.
+        - ``n_zero_rows`` — rows of the active Jacobian at norm ≤ ``zero_tol``.
+        - ``n_zero_cols`` — columns at norm ≤ ``zero_tol``.
+        - ``min_singular_value`` — smallest singular value of the active
+          Jacobian (``None`` when the active matrix is empty / not converged).
+        - ``merit_disagreement_ratio`` — see :func:`merit_cross_check`.
     """
     if not result.success:
         return {

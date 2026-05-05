@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 import pympcc
+from pympcc._constants import IPOPT_DEFAULT_TOL as _IPOPT_DEFAULT_TOL
 
 from ._problems import ALL_PROBLEMS, PROBLEM_NAMES, ProblemSpec
 
@@ -73,7 +74,7 @@ def run_benchmark(
     strategies: Sequence[str] = ("scholtes",),
     ipopt_options: Optional[dict] = None,
     max_iter: int = 3000,
-    tol: float = 1e-8,
+    tol: float = _IPOPT_DEFAULT_TOL,
     verbose: bool = False,
 ) -> list[BenchmarkResult]:
     """Solve every problem with every strategy and return structured results.
@@ -131,6 +132,10 @@ def run_benchmark(
                 success = result.success
                 ipopt_status = result.status
             except Exception as exc:
+                # Broad by design: a benchmark sweep must continue across
+                # the remaining (problem, strategy) pairs even if any
+                # individual solve raises.  Type + message are recorded on
+                # the BenchmarkResult below.
                 elapsed = time.perf_counter() - t0
                 err_msg = f"{type(exc).__name__}: {exc}"
                 if verbose:
@@ -284,7 +289,7 @@ def _parse() -> argparse.Namespace:
     )
     p.add_argument("--max-iter", type=int, default=3000, dest="max_iter",
                    help="IPOPT max iterations per NLP solve.")
-    p.add_argument("--tol", type=float, default=1e-8,
+    p.add_argument("--tol", type=float, default=_IPOPT_DEFAULT_TOL,
                    help="IPOPT convergence tolerance.")
     p.add_argument("--out", default=None, metavar="FILE",
                    help="Save results to a CSV file.")
